@@ -1,0 +1,17 @@
+; TCCS AMI configuration template.
+; Copy to /etc/asterisk/manager.conf on the test VM and change the password.
+; Keep the AMI user restricted to localhost.
+
+[general]
+enabled = yes
+webenabled = no
+port = 5038
+bindaddr = 127.0.0.1
+
+[tccs-controller]
+type = user
+read = system,call,log,verbose,command,agent,user,config,dtmf,reporting
+write = system,call,command,agent,user,config,dtmf,reporting
+secret = CHANGE-ME-AMI-PASSWORD
+
+; In production, restrict AMI permissions further and use a strong secret.
