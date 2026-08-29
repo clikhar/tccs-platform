@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import Dict, Optional
+from typing import Dict
 
 AMI_HOST = os.getenv("AMI_HOST", "127.0.0.1")
 AMI_PORT = int(os.getenv("AMI_PORT", "5038"))
@@ -16,7 +16,7 @@ async def _read_frame(reader: asyncio.StreamReader, timeout: float = AMI_TIMEOUT
     try:
         return await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout)
     except asyncio.IncompleteReadError as exc:
-        raise RuntimeError("AMI connection closed before response") from exc
+        raise RuntimeError("AMI connection closed before complete message") from exc
     except asyncio.LimitOverrunError as exc:
         raise RuntimeError("AMI response exceeded reader limit") from exc
     except asyncio.TimeoutError as exc:
@@ -30,6 +30,16 @@ def _parse_message(raw: bytes) -> Dict[str, str]:
             key, value = line.split(":", 1)
             result[key.strip()] = value.strip()
     return result
+
+
+async def _read_greeting(reader: asyncio.StreamReader) -> bytes:
+    try:
+        line = await asyncio.wait_for(reader.readline(), timeout=AMI_TIMEOUT)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("AMI greeting timeout") from exc
+    if not line.startswith(b"Asterisk Call Manager/"):
+        raise RuntimeError("Invalid AMI greeting")
+    return line
 
 
 async def _read_action_response(reader: asyncio.StreamReader, action_id: str) -> Dict[str, str]:
@@ -58,11 +68,11 @@ async def _send_action(writer: asyncio.StreamWriter, action: str) -> None:
 
 
 async def originate_to_conference(extension: str, conference: str) -> Dict[str, str]:
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=AMI_TIMEOUT)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=AMI_TIMEOUT
+    )
     try:
-        greeting = await _read_frame(reader)
-        if not greeting.startswith(b"Asterisk Call Manager/"):
-            raise RuntimeError("Invalid AMI greeting")
+        await _read_greeting(reader)
 
         login_id = f"tccs-login-{uuid.uuid4()}"
         await _send_action(
