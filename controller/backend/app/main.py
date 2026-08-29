@@ -9,21 +9,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .asterisk import endpoint_status
+from .calls import call_station
 from .db import get_db
 from .models import Section, Station
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.3.5")
+app = FastAPI(title="TCCS Controller API", version="0.3.6")
 
-allowed_origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 frontend_origin = os.getenv("TCCS_FRONTEND_ORIGIN")
 if frontend_origin:
     allowed_origins.append(frontend_origin.rstrip("/"))
-
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=False, allow_methods=["GET", "PUT", "OPTIONS"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"])
 
 @app.get("/health")
 def health():
@@ -58,6 +55,21 @@ async def save_station_order(station_ids: List[int] = Body(..., embed=True), db:
 @app.get("/api/v1/asterisk/endpoints")
 async def asterisk_endpoints():
     return await endpoint_status()
+
+@app.post("/api/v1/calls/stations/{station_id}")
+async def originate_station_call(station_id: int, db: AsyncSession = Depends(get_db)):
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    statuses = await endpoint_status()
+    status_by_ext = {item["sip_extension"]: item["status"] for item in statuses}
+    if status_by_ext.get(station.sip_extension) != "REGISTERED":
+        raise HTTPException(status_code=409, detail="Station SIP endpoint is not registered")
+    try:
+        response = await call_station(station.sip_extension)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Asterisk originate failed: {exc}")
+    return {"status": "ORIGINATED", "station_id": station.id, "station_number": station.station_number, "sip_extension": station.sip_extension, "ami_response": response}
 
 @app.get("/api/v1/stations/{station_id}", response_model=StationOut)
 async def get_station(station_id: int, db: AsyncSession = Depends(get_db)) -> Station:
