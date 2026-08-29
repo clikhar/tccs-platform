@@ -38,12 +38,32 @@ function App() {
 
   useEffect(() => { loadStations(); }, []);
 
+  const callStation = (station: Station) => {
+    if (station.state === 'OFFLINE') {
+      setMessage(`Station ${station.id} is offline`);
+      setModal(null);
+      return;
+    }
+
+    setParticipants(current => {
+      if (current.some(p => p.id === station.id)) return current;
+      return [...current, { id: station.id, name: station.name, state: 'LISTENING' }];
+    });
+    setStations(current => current.map(s => s.id === station.id ? { ...s, state: 'CALLING' } : s));
+    setMessage(`Calling station ${station.id} • automatically added to active conference`);
+    setModal(null);
+  };
+
   const addParticipant = (station: Station) => {
     if (station.state === 'OFFLINE') return setMessage(`Station ${station.id} is offline`);
     setParticipants(current => current.some(p => p.id === station.id) ? current : [...current, { id: station.id, name: station.name, state: 'LISTENING' }]);
     setMessage(`Station ${station.id} added to conference`); setModal(null);
   };
-  const generalCall = () => { setParticipants(stations.filter(s => s.state !== 'OFFLINE').map(s => ({ id: s.id, name: s.name, state: 'LISTENING' }))); setMessage('General call prepared for all available stations'); };
+
+  const generalCall = () => {
+    setParticipants(stations.filter(s => s.state !== 'OFFLINE').map(s => ({ id: s.id, name: s.name, state: 'LISTENING' })));
+    setMessage('General call prepared for all available stations');
+  };
   const toggleMute = (id: string) => setParticipants(current => current.map(p => p.id === id ? { ...p, state: p.state === 'MUTED' ? 'LISTENING' : 'MUTED' } : p));
   const remove = (id: string) => setParticipants(current => current.filter(p => p.id !== id));
 
@@ -59,12 +79,12 @@ function App() {
       <section className="panel"><div className="section-title"><h2>Active Conference</h2><span>{participants.length ? `${participants.length} participant(s)` : 'No active conference'}</span></div>{participants.length === 0 ? <div className="empty">No active participants</div> : <div className="participants">{participants.map(p => <div className="participant" key={p.id}><b>{p.id} — {p.name}</b><span>● {p.state}</span><button onClick={() => toggleMute(p.id)}>{p.state === 'MUTED' ? 'UNMUTE' : 'MUTE'}</button><button onClick={() => remove(p.id)}>REMOVE</button></div>)}</div>}</section>
       <div className="bottom-actions"><button onClick={() => setMessage('Hold control selected')}>Hold</button><button onClick={() => setMessage('Transfer control selected')}>Transfer</button><button onClick={() => setModal('recordings')}>Recordings</button><button onClick={() => setModal('diagnostics')}>Diagnostics</button><button className="emergency" onClick={() => setModal('emergency')}>EMERGENCY</button></div><div className="statusbar">{message}</div>
     </main>
-    {modal && <Modal modal={modal} stations={stations} onClose={() => setModal(null)} onAdd={addParticipant} />}
+    {modal && <Modal modal={modal} stations={stations} onClose={() => setModal(null)} onCall={callStation} onAdd={addParticipant} />}
   </div>;
 }
 
-function Modal({ modal, stations, onClose, onAdd }: { modal: string; stations: Station[]; onClose: () => void; onAdd: (s: Station) => void }) {
-  if (modal.startsWith('station:')) { const id = modal.split(':')[1]; const s = stations.find(x => x.id === id); if (!s) return null; return <Overlay title={`Station ${s.id}`} onClose={onClose}><p><b>{s.name}</b><br />Location: {s.location || '—'}<br />Status: {s.state}<br />SIP extension: {s.sipExtension}</p><div className="modal-list"><button onClick={() => alert(`Prototype: call station ${s.id}`)}>CALL STATION</button><button onClick={() => onAdd(s)}>ADD TO CONFERENCE</button></div></Overlay>; }
+function Modal({ modal, stations, onClose, onCall, onAdd }: { modal: string; stations: Station[]; onClose: () => void; onCall: (s: Station) => void; onAdd: (s: Station) => void }) {
+  if (modal.startsWith('station:')) { const id = modal.split(':')[1]; const s = stations.find(x => x.id === id); if (!s) return null; return <Overlay title={`Station ${s.id}`} onClose={onClose}><p><b>{s.name}</b><br />Location: {s.location || '—'}<br />Status: {s.state}<br />SIP extension: {s.sipExtension}</p><div className="modal-list"><button onClick={() => onCall(s)}>CALL STATION</button><button onClick={() => onAdd(s)}>ADD TO CONFERENCE</button></div></Overlay>; }
   if (modal === 'add') return <Overlay title="Add Subscriber" onClose={onClose}><p>Select a registered station.</p><div className="modal-list">{stations.map(s => <button key={s.id} onClick={() => onAdd(s)}>{s.id} — {s.name}</button>)}</div></Overlay>;
   if (modal === 'directory') return <Overlay title="Directory" onClose={onClose}><div className="modal-list">{stations.map(s => <button key={s.id}>{s.id} — {s.name} — {s.state}</button>)}</div></Overlay>;
   if (modal === 'group') return <Overlay title="Group Call" onClose={onClose}><p>Configured groups will be loaded from PostgreSQL in the backend phase.</p><div className="modal-list"><button onClick={onClose}>SECTION 01 GROUP</button></div></Overlay>;
