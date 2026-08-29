@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SectionOut(BaseModel):
@@ -28,3 +28,7 @@ class StationOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class StationOrderRequest(BaseModel):
+    station_ids: List[int] = Field(..., min_items=1)
