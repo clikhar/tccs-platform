@@ -1,3 +1,5 @@
+from typing import Optional
+
 from sqlalchemy import Boolean, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -21,7 +23,7 @@ class Controller(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
-    section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id"))
+    section_id: Mapped[Optional[int]] = mapped_column(ForeignKey("sections.id"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -31,7 +33,7 @@ class Station(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     station_number: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
-    location: Mapped[str | None] = mapped_column(String(256))
+    location: Mapped[Optional[str]] = mapped_column(String(256))
     section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), index=True)
     sip_extension: Mapped[str] = mapped_column(String(64), unique=True)
     station_type: Mapped[str] = mapped_column(String(32), default="WAY_STATION")
@@ -45,5 +47,5 @@ class StationGroup(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
-    section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id"))
+    section_id: Mapped[Optional[int]] = mapped_column(ForeignKey("sections.id"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
