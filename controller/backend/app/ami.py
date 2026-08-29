@@ -2,25 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Dict
+import uuid
+from typing import Dict, Optional
 
 AMI_HOST = os.getenv("AMI_HOST", "127.0.0.1")
 AMI_PORT = int(os.getenv("AMI_PORT", "5038"))
 AMI_USERNAME = os.getenv("AMI_USERNAME", "tccs-controller")
 AMI_SECRET = os.getenv("AMI_SECRET", "tccsngp")
+AMI_TIMEOUT = float(os.getenv("AMI_TIMEOUT", "5"))
 
 
-async def _read_until(reader: asyncio.StreamReader, marker: bytes = b"\r\n\r\n", timeout: float = 5.0) -> bytes:
-    data = b""
+async def _read_frame(reader: asyncio.StreamReader, timeout: float = AMI_TIMEOUT) -> bytes:
     try:
-        while marker not in data:
-            chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
-            if not chunk:
-                break
-            data += chunk
+        return await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=timeout)
+    except asyncio.IncompleteReadError as exc:
+        raise RuntimeError("AMI connection closed before response") from exc
+    except asyncio.LimitOverrunError as exc:
+        raise RuntimeError("AMI response exceeded reader limit") from exc
     except asyncio.TimeoutError as exc:
         raise RuntimeError("AMI response timeout") from exc
-    return data
 
 
 def _parse_message(raw: bytes) -> Dict[str, str]:
@@ -32,44 +32,81 @@ def _parse_message(raw: bytes) -> Dict[str, str]:
     return result
 
 
+async def _read_action_response(reader: asyncio.StreamReader, action_id: str) -> Dict[str, str]:
+    deadline = asyncio.get_running_loop().time() + AMI_TIMEOUT
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise RuntimeError(f"AMI action timeout: {action_id}")
+        try:
+            raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=remaining)
+        except asyncio.IncompleteReadError as exc:
+            raise RuntimeError("AMI connection closed while waiting for action response") from exc
+        except asyncio.LimitOverrunError as exc:
+            raise RuntimeError("AMI response exceeded reader limit") from exc
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(f"AMI action timeout: {action_id}") from exc
+
+        message = _parse_message(raw)
+        if message.get("ActionID") == action_id:
+            return message
+
+
+async def _send_action(writer: asyncio.StreamWriter, action: str) -> None:
+    writer.write((action + "\r\n\r\n").encode())
+    await writer.drain()
+
+
 async def originate_to_conference(extension: str, conference: str) -> Dict[str, str]:
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=5)
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=AMI_TIMEOUT)
     try:
-        await _read_until(reader)
-        login = (
-            "Action: Login\r\n"
-            f"Username: {AMI_USERNAME}\r\n"
-            f"Secret: {AMI_SECRET}\r\n"
-            "Events: off\r\n\r\n"
-        ).encode()
-        writer.write(login)
-        await writer.drain()
-        login_response = _parse_message(await _read_until(reader))
+        greeting = await _read_frame(reader)
+        if not greeting.startswith(b"Asterisk Call Manager/"):
+            raise RuntimeError("Invalid AMI greeting")
+
+        login_id = f"tccs-login-{uuid.uuid4()}"
+        await _send_action(
+            writer,
+            "\r\n".join([
+                "Action: Login",
+                f"ActionID: {login_id}",
+                f"Username: {AMI_USERNAME}",
+                f"Secret: {AMI_SECRET}",
+                "Events: off",
+            ]),
+        )
+        login_response = await _read_action_response(reader, login_id)
         if login_response.get("Response") != "Success":
             raise RuntimeError(login_response.get("Message", "AMI login failed"))
 
-        action = (
-            "Action: Originate\r\n"
-            f"Channel: PJSIP/{extension}\r\n"
-            "Context: tccs-stations\r\n"
-            "Exten: 900\r\n"
-            "Priority: 1\r\n"
-            "Timeout: 30000\r\n"
-            "CallerID: TCCS Controller <9999>\r\n"
-            "Async: true\r\n"
-            f"Variable: TCCS_CONFERENCE={conference}\r\n\r\n"
-        ).encode()
-        writer.write(action)
-        await writer.drain()
-        response = _parse_message(await _read_until(reader))
+        originate_id = f"tccs-originate-{uuid.uuid4()}"
+        await _send_action(
+            writer,
+            "\r\n".join([
+                "Action: Originate",
+                f"ActionID: {originate_id}",
+                f"Channel: PJSIP/{extension}",
+                "Context: tccs-stations",
+                "Exten: 900",
+                "Priority: 1",
+                "Timeout: 30000",
+                "CallerID: TCCS Controller <9999>",
+                "Async: true",
+                f"Variable: TCCS_CONFERENCE={conference}",
+            ]),
+        )
+        response = await _read_action_response(reader, originate_id)
         if response.get("Response") != "Success":
             raise RuntimeError(response.get("Message", "AMI originate failed"))
         return response
     finally:
         try:
-            writer.write(b"Action: Logoff\r\n\r\n")
-            await writer.drain()
+            logoff_id = f"tccs-logoff-{uuid.uuid4()}"
+            await _send_action(writer, f"Action: Logoff\r\nActionID: {logoff_id}")
         except Exception:
             pass
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
