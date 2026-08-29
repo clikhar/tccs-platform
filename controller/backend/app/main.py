@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -11,15 +12,19 @@ from .db import get_db
 from .models import Section, Station
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.3.2")
+app = FastAPI(title="TCCS Controller API", version="0.3.3")
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+frontend_origin = os.getenv("TCCS_FRONTEND_ORIGIN")
+if frontend_origin:
+    allowed_origins.append(frontend_origin.rstrip("/"))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://10.158.141.5:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
