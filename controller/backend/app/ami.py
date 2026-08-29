@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Dict, Optional
+from typing import Dict
 
 AMI_HOST = os.getenv("AMI_HOST", "127.0.0.1")
 AMI_PORT = int(os.getenv("AMI_PORT", "5038"))
 AMI_USERNAME = os.getenv("AMI_USERNAME", "tccs-controller")
-AMI_SECRET = os.getenv("AMI_SECRET", "CHANGE-ME-AMI-PASSWORD")
+AMI_SECRET = os.getenv("AMI_SECRET", "tccsngp")
 
 
-async def _read_until(reader: asyncio.StreamReader, marker: bytes = b"\r\n\r\n") -> bytes:
+async def _read_until(reader: asyncio.StreamReader, marker: bytes = b"\r\n\r\n", timeout: float = 5.0) -> bytes:
     data = b""
-    while marker not in data:
-        chunk = await reader.read(4096)
-        if not chunk:
-            break
-        data += chunk
+    try:
+        while marker not in data:
+            chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+            if not chunk:
+                break
+            data += chunk
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("AMI response timeout") from exc
     return data
 
 
@@ -30,16 +33,14 @@ def _parse_message(raw: bytes) -> Dict[str, str]:
 
 
 async def originate_to_conference(extension: str, conference: str) -> Dict[str, str]:
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=5
-    )
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=5)
     try:
         await _read_until(reader)
         login = (
-            f"Action: Login\r\n"
+            "Action: Login\r\n"
             f"Username: {AMI_USERNAME}\r\n"
             f"Secret: {AMI_SECRET}\r\n"
-            f"Events: off\r\n\r\n"
+            "Events: off\r\n\r\n"
         ).encode()
         writer.write(login)
         await writer.drain()
