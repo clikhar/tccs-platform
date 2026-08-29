@@ -1,13 +1,11 @@
--- Initial TCCS Controller data model.
--- This is intentionally provider-neutral SQL; migrations will formalize deployment later.
+-- TCCS Controller application schema.
+-- PostgreSQL is the development database; application models are the runtime source of truth.
 
 CREATE TABLE IF NOT EXISTS sections (
     id BIGSERIAL PRIMARY KEY,
     code VARCHAR(32) NOT NULL UNIQUE,
     name VARCHAR(128) NOT NULL,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS controllers (
@@ -15,9 +13,7 @@ CREATE TABLE IF NOT EXISTS controllers (
     code VARCHAR(32) NOT NULL UNIQUE,
     name VARCHAR(128) NOT NULL,
     section_id BIGINT REFERENCES sections(id),
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS stations (
@@ -29,9 +25,7 @@ CREATE TABLE IF NOT EXISTS stations (
     sip_extension VARCHAR(64) NOT NULL UNIQUE,
     station_type VARCHAR(32) NOT NULL DEFAULT 'WAY_STATION',
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    priority INTEGER NOT NULL DEFAULT 100,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    priority INTEGER NOT NULL DEFAULT 100
 );
 
 CREATE TABLE IF NOT EXISTS station_groups (
@@ -39,9 +33,7 @@ CREATE TABLE IF NOT EXISTS station_groups (
     code VARCHAR(32) NOT NULL UNIQUE,
     name VARCHAR(128) NOT NULL,
     section_id BIGINT REFERENCES sections(id),
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS station_group_members (
