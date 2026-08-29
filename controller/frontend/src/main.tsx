@@ -43,7 +43,6 @@ function App() {
       setMessage(`Station ${station.id} is offline`);
       return;
     }
-
     setParticipants(current => {
       if (current.some(p => p.id === station.id)) return current;
       return [...current, { id: station.id, name: station.name, state: 'LISTENING' }];
@@ -62,8 +61,16 @@ function App() {
     setParticipants(stations.filter(s => s.state !== 'OFFLINE').map(s => ({ id: s.id, name: s.name, state: 'LISTENING' })));
     setMessage('General call prepared for all available stations');
   };
-  const toggleMute = (id: string) => setParticipants(current => current.map(p => p.id === id ? { ...p, state: p.state === 'MUTED' ? 'LISTENING' : 'MUTED' } : p));
-  const remove = (id: string) => setParticipants(current => current.filter(p => p.id !== id));
+  const toggleMute = (id: string) => {
+    setParticipants(current => current.map(p => p.id === id ? { ...p, state: p.state === 'MUTED' ? 'LISTENING' : 'MUTED' } : p));
+    const participant = participants.find(p => p.id === id);
+    setMessage(`${participant?.name || `Station ${id}`} ${participant?.state === 'MUTED' ? 'unmuted' : 'muted'}`);
+  };
+  const remove = (id: string) => {
+    setParticipants(current => current.filter(p => p.id !== id));
+    setStations(current => current.map(s => s.id === id ? { ...s, state: 'ONLINE' } : s));
+    setMessage(`Station ${id} removed from conference`);
+  };
 
   return <div className="app">
     <header className="topbar"><div><div className="brand">TCCS</div><div className="subtitle">Train Control Communication System</div></div><div className="top-status"><span>SECTION <b>01</b></span><span>CONTROLLER <b>C01</b></span><span className={apiError ? 'error' : 'ok'}>● {apiError ? 'API OFFLINE' : loading ? 'CONNECTING' : 'SYSTEM NORMAL'}</span></div></header>
@@ -77,7 +84,7 @@ function App() {
         </section>
 
         <section className="panel conference-panel"><div className="section-title"><h2>Active Conference</h2><span>{participants.length ? `${participants.length} participant(s)` : 'No active conference'}</span></div>
-          {participants.length === 0 ? <div className="empty">No active participants</div> : <div className="conference-table"><div className="conference-head"><span>STATION</span><span>NAME</span><span>STATUS</span><span>ACTION</span></div>{participants.map(p => <div className="participant" key={p.id}><b>{p.id}</b><span>{p.name}</span><span className="participant-state">● {p.state}</span><button onClick={() => remove(p.id)} title="Remove station from conference">HANG UP</button></div>)}</div>}
+          {participants.length === 0 ? <div className="empty">No active participants</div> : <div className="conference-table"><div className="conference-head"><span>STATION</span><span>NAME</span><span>STATUS</span><span>ACTION</span></div>{participants.map(p => <div className="participant" key={p.id}><b>{p.id}</b><span>{p.name}</span><span className="participant-state">● {p.state}</span><div className="participant-actions"><button className={p.state === 'MUTED' ? 'muted-action' : ''} onClick={() => toggleMute(p.id)} title={p.state === 'MUTED' ? 'Unmute station' : 'Mute station'}>{p.state === 'MUTED' ? 'UNMUTE' : 'MUTE'}</button><button className="hangup-action" onClick={() => remove(p.id)} title="Remove station from conference">HANG UP</button></div></div>)}</div>}
         </section>
       </div>
 
