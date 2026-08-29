@@ -14,13 +14,15 @@ app = FastAPI(title="TCCS Controller API", version="0.3.1")
 
 
 @app.get("/health")
-def health() -> dict:
+def health():
     return {"status": "ok", "service": "tccs-controller-api"}
 
 
 @app.get("/api/v1/sections", response_model=List[SectionOut])
 async def list_sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
-    result = await db.scalars(select(Section).where(Section.enabled.is_(True)).order_by(Section.code))
+    result = await db.scalars(
+        select(Section).where(Section.enabled.is_(True)).order_by(Section.code)
+    )
     return list(result.all())
 
 
@@ -32,12 +34,17 @@ async def list_stations(
     query = select(Station).where(Station.enabled.is_(True))
     if section_id is not None:
         query = query.where(Station.section_id == section_id)
-    result = await db.scalars(query.order_by(Station.priority, Station.station_number))
+    result = await db.scalars(
+        query.order_by(Station.priority, Station.station_number)
+    )
     return list(result.all())
 
 
 @app.get("/api/v1/stations/{station_id}", response_model=StationOut)
-async def get_station(station_id: int, db: AsyncSession = Depends(get_db)) -> Station:
+async def get_station(
+    station_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> Station:
     station = await db.get(Station, station_id)
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
