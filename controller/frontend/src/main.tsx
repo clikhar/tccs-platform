@@ -10,7 +10,7 @@ type Station = { id: string; dbId: number; name: string; state: State; sipExtens
 type Participant = { id: string; name: string; state: 'CALLING' | 'LISTENING' | 'MUTED' | 'TALKING' };
 type ControllerStatus = 'CONNECTING' | 'REGISTERED' | 'IN CONFERENCE' | 'DISCONNECTED' | 'ERROR';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:8000`;
 const ASTERISK_HOST = import.meta.env.VITE_ASTERISK_HOST || window.location.hostname;
 const SIP_WS_URL = import.meta.env.VITE_SIP_WS_URL || `wss://${ASTERISK_HOST}:8089/ws`;
 const CONTROLLER_EXTENSION = import.meta.env.VITE_CONTROLLER_EXTENSION || '9999';
