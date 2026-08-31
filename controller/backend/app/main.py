@@ -16,11 +16,24 @@ from .schemas import SectionOut, StationOut
 
 app = FastAPI(title="TCCS Controller API", version="0.3.6")
 
-allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Browser access is required when the frontend is served by Vite from the
+# controller VM's LAN address. Keep explicit origins rather than using '*'.
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://192.168.1.21:5173",
+]
 frontend_origin = os.getenv("TCCS_FRONTEND_ORIGIN")
 if frontend_origin:
     allowed_origins.append(frontend_origin.rstrip("/"))
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.get("/health")
 def health():
