@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import Dict
+from typing import Dict, List, Optional
 
 AMI_HOST = os.getenv("AMI_HOST", "127.0.0.1")
 AMI_PORT = int(os.getenv("AMI_PORT", "5038"))
@@ -127,7 +127,7 @@ async def originate_to_conference(extension: str, conference: str) -> Dict[str, 
             pass
 
 
-async def conference_channel(extension: str, conference: str = "SECTION01") -> str | None:
+async def conference_channel(extension: str, conference: str = "SECTION01") -> Optional[str]:
     reader, writer = await asyncio.wait_for(asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=AMI_TIMEOUT)
     try:
         await _login(reader, writer)
@@ -137,7 +137,7 @@ async def conference_channel(extension: str, conference: str = "SECTION01") -> s
             "Command: core show channels verbose",
         ]))
         deadline = asyncio.get_running_loop().time() + AMI_TIMEOUT
-        chunks: list[str] = []
+        chunks: List[str] = []
         while asyncio.get_running_loop().time() < deadline:
             try:
                 raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=0.5)
