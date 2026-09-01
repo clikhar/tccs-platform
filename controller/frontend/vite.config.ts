@@ -2,14 +2,13 @@ import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 /**
- * Keep controller SIP connection user-initiated.
+ * Keep controller SIP connection user-initiated and make the conference
+ * session lifecycle visible in the existing UI.
  *
- * Browser microphone access is involved in the controller conference. The
- * previous React mount effect started SIP.js automatically, which could
- * create the WebRTC session before a user gesture and left the UI in
- * REGISTERED after a terminated conference with CONNECT disabled.
- * This compatibility transform keeps the existing UI while making CONNECT
- * explicitly user-initiated and allowing reconnect after termination.
+ * The browser must register first and then place the conference INVITE from
+ * the CONNECT button. A pending SIP INVITE must not look like a successful
+ * registration, otherwise the operator cannot distinguish REGISTERED from
+ * actually being in SECTION01.
  */
 function controllerSessionLifecycle(): Plugin {
   return {
@@ -25,6 +24,10 @@ function controllerSessionLifecycle(): Plugin {
       transformed = transformed.replace(
         'useEffect(()=>{connectController();return()=>{disconnectController();if(audioRef.current){audioRef.current.remove();audioRef.current=null;}};},[]);',
         'useEffect(()=>{return()=>{disconnectController();if(audioRef.current){audioRef.current.remove();audioRef.current=null;}};},[]);',
+      );
+      transformed = transformed.replace(
+        "setControllerStatus('REGISTERED');setMessage('Controller 9999 registered');await joinControllerConference(ua);",
+        "setControllerStatus('CONNECTING');setMessage('Registered • joining SECTION 01...');await joinControllerConference(ua);",
       );
       transformed = transformed.replace(
         "disabled={controllerStatus!=='DISCONNECTED'&&controllerStatus!=='ERROR'}",
