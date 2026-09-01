@@ -5,14 +5,13 @@ import react from '@vitejs/plugin-react';
  * Keep controller SIP connection user-initiated and make the conference
  * session lifecycle visible in the existing UI.
  *
- * The browser must register first and then place the conference INVITE from
- * the CONNECT button. A pending SIP INVITE must not look like a successful
- * registration, otherwise the operator cannot distinguish REGISTERED from
- * actually being in SECTION01.
+ * This transform must run before @vitejs/plugin-react so it operates on the
+ * original TSX source rather than already-transformed JavaScript.
  */
 function controllerSessionLifecycle(): Plugin {
   return {
     name: 'tccs-controller-session-lifecycle',
+    enforce: 'pre',
     transform(code, id) {
       if (!id.endsWith('/src/main.tsx')) return null;
 
@@ -40,9 +39,15 @@ function controllerSessionLifecycle(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), controllerSessionLifecycle()],
+  plugins: [controllerSessionLifecycle(), react()],
   server: {
     host: '0.0.0.0',
     port: 5173,
+    strictPort: true,
+    hmr: {
+      protocol: 'wss',
+      host: '192.168.1.21',
+      clientPort: 443,
+    },
   },
 });
