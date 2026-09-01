@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from typing import Dict, List, Optional
 
@@ -10,6 +11,7 @@ AMI_PORT = int(os.getenv("AMI_PORT", "5038"))
 AMI_USERNAME = os.getenv("AMI_USERNAME", "tccs-controller")
 AMI_SECRET = os.getenv("AMI_SECRET", "tccsngp")
 AMI_TIMEOUT = float(os.getenv("AMI_TIMEOUT", "5"))
+ASTERISK_CLI = os.getenv("ASTERISK_CLI", "/usr/sbin/asterisk")
 
 
 async def _read_frame(reader: asyncio.StreamReader, timeout: float = AMI_TIMEOUT) -> bytes:
@@ -128,41 +130,24 @@ async def originate_to_conference(extension: str, conference: str) -> Dict[str, 
 
 
 async def conference_channel(extension: str, conference: str = "SECTION01") -> Optional[str]:
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(AMI_HOST, AMI_PORT), timeout=AMI_TIMEOUT)
-    try:
-        await _login(reader, writer)
-        action_id = f"tccs-command-{uuid.uuid4()}"
-        await _send_action(writer, "\r\n".join([
-            "Action: Command", f"ActionID: {action_id}",
-            "Command: core show channels verbose",
-        ]))
-        deadline = asyncio.get_running_loop().time() + AMI_TIMEOUT
-        chunks: List[str] = []
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=0.5)
-            except asyncio.TimeoutError:
-                break
-            message = _parse_message(raw)
-            if message.get("ActionID") == action_id:
-                chunks.append(message.get("Message", ""))
-                if message.get("EventList") == "Complete" or message.get("Message"):
-                    break
-        text = "\n".join(chunks)
-        for line in text.splitlines():
-            if f"PJSIP/{extension}-" in line and f"ConfBridge({conference})" in line:
-                return line.strip().split()[0]
-        return None
-    finally:
-        try:
-            await _send_action(writer, f"Action: Logoff\r\nActionID: tccs-logoff-{uuid.uuid4()}")
-        except Exception:
-            pass
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
+    process = await asyncio.create_subprocess_exec(
+        ASTERISK_CLI, "-rx", "core show channels verbose",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=AMI_TIMEOUT)
+    if process.returncode != 0:
+        raise RuntimeError("Unable to inspect active Asterisk channels")
+    output = stdout.decode(errors="replace")
+    for line in output.splitlines():
+        if f"PJSIP/{extension}-" not in line:
+            continue
+        if not re.search(rf"ConfBridge\({re.escape(conference)}(?:[),]|$)", line, re.I):
+            continue
+        match = re.match(r"\s*(PJSIP/\S+)", line)
+        if match:
+            return match.group(1)
+    return None
 
 
 async def hangup_conference_channel(extension: str, conference: str = "SECTION01") -> Dict[str, str]:
