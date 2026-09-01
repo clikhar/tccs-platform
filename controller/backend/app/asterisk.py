@@ -20,13 +20,30 @@ def _parse_contacts(output: str) -> Dict[str, str]:
 def _parse_active_channels(output: str) -> Dict[str, str]:
     channels: Dict[str, str] = {}
     for line in output.splitlines():
-        match = re.match(r"\s*PJSIP/(\d+)-[^\s]+\s+.*?\s+(Ring|Up|Down|Rsrvd|Busy)\s+", line, re.I)
-        if match:
-            channels[match.group(1)] = match.group(2).upper()
+        # core show channels verbose contains Application and Data after the state.
+        # Only consider a station to be IN CALL when its own PJSIP channel is active.
+        match = re.match(
+            r"\s*PJSIP/(\d+)-\S+\s+\S+\s+\S+\s+\d+\s+(\S+)\s+(\S+)\s*(.*)$",
+            line,
+            re.I,
+        )
+        if not match:
             continue
-        match = re.match(r"\s*PJSIP/(\d+)-[^\s]+\s+\S+\s+(\S+)", line, re.I)
-        if match:
-            channels[match.group(1)] = match.group(2).upper()
+        extension, state, application, data = match.groups()
+        state_upper = state.upper()
+        app_upper = application.upper()
+        data_upper = data.upper()
+
+        if app_upper.startswith("CONFBRIDGE") and "SECTION01" in data_upper:
+            channels[extension] = "IN CONFERENCE"
+        elif state_upper in {"RING", "RINGING"}:
+            channels[extension] = "RINGING"
+        elif state_upper == "BUSY" or "BUSY" in app_upper:
+            channels[extension] = "BUSY"
+        elif state_upper == "UP":
+            channels[extension] = "IN CALL"
+        else:
+            channels[extension] = state_upper
     return channels
 
 
@@ -58,12 +75,7 @@ async def endpoint_status() -> List[Dict[str, Any]]:
         for extension, contact_state in sorted(contacts.items()):
             channel_state = active_channels.get(extension)
             if channel_state:
-                if "BUSY" in channel_state:
-                    asterisk_state = "Busy"
-                elif "RING" in channel_state:
-                    asterisk_state = "Ringing"
-                else:
-                    asterisk_state = "Up"
+                asterisk_state = channel_state
             else:
                 asterisk_state = "Not in use" if contact_state == "AVAIL" else contact_state
 
