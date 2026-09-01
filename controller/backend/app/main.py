@@ -9,15 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .asterisk import endpoint_status
+from .ami import hangup_conference_channel, mute_conference_channel
 from .calls import call_station
 from .db import get_db
 from .models import Section, Station
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.3.6")
+app = FastAPI(title="TCCS Controller API", version="0.3.7")
 
-# Browser access is required when the frontend is served by Vite from the
-# controller VM's LAN address. Keep explicit origins rather than using '*'.
 allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -83,6 +82,39 @@ async def originate_station_call(station_id: int, db: AsyncSession = Depends(get
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Asterisk originate failed: {exc}")
     return {"status": "ORIGINATED", "station_id": station.id, "station_number": station.station_number, "sip_extension": station.sip_extension, "ami_response": response}
+
+@app.post("/api/v1/conference/stations/{station_id}/mute")
+async def mute_station(station_id: int, db: AsyncSession = Depends(get_db)):
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    try:
+        response = await mute_conference_channel(station.sip_extension, "SECTION01", True)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "MUTED", "station_id": station.id, "sip_extension": station.sip_extension, "ami_response": response}
+
+@app.post("/api/v1/conference/stations/{station_id}/unmute")
+async def unmute_station(station_id: int, db: AsyncSession = Depends(get_db)):
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    try:
+        response = await mute_conference_channel(station.sip_extension, "SECTION01", False)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "UNMUTED", "station_id": station.id, "sip_extension": station.sip_extension, "ami_response": response}
+
+@app.post("/api/v1/conference/stations/{station_id}/hangup")
+async def hangup_station(station_id: int, db: AsyncSession = Depends(get_db)):
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    try:
+        response = await hangup_conference_channel(station.sip_extension, "SECTION01")
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "HUNG_UP", "station_id": station.id, "sip_extension": station.sip_extension, "ami_response": response}
 
 @app.get("/api/v1/stations/{station_id}", response_model=StationOut)
 async def get_station(station_id: int, db: AsyncSession = Depends(get_db)) -> Station:
