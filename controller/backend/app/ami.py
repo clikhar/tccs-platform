@@ -130,23 +130,44 @@ async def originate_to_conference(extension: str, conference: str) -> Dict[str, 
 
 
 async def conference_channel(extension: str, conference: str = "SECTION01") -> Optional[str]:
+    """Find the live PJSIP station channel currently running ConfBridge.
+
+    The previous implementation parsed `core show channels verbose`, whose
+    human-readable layout is not stable enough for reliable channel matching.
+    `core show channels concise` has a documented, delimiter-separated layout:
+    Channel!Context!Exten!Priority!State!Application!Data!...
+    """
     process = await asyncio.create_subprocess_exec(
-        ASTERISK_CLI, "-rx", "core show channels verbose",
+        ASTERISK_CLI, "-rx", "core show channels concise",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=AMI_TIMEOUT)
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=AMI_TIMEOUT)
     if process.returncode != 0:
-        raise RuntimeError("Unable to inspect active Asterisk channels")
-    output = stdout.decode(errors="replace")
-    for line in output.splitlines():
-        if f"PJSIP/{extension}-" not in line:
+        detail = stderr.decode(errors="replace").strip()
+        raise RuntimeError(detail or "Unable to inspect active Asterisk channels")
+
+    wanted_prefix = f"PJSIP/{extension}-"
+    wanted_conference = conference.strip().lower()
+
+    for line in stdout.decode(errors="replace").splitlines():
+        fields = line.strip().split("!")
+        if len(fields) < 7:
             continue
-        if not re.search(rf"ConfBridge\({re.escape(conference)}(?:[),]|$)", line, re.I):
+
+        channel = fields[0].strip()
+        application = fields[5].strip().lower()
+        data = fields[6].strip()
+
+        if not channel.startswith(wanted_prefix):
             continue
-        match = re.match(r"\s*(PJSIP/\S+)", line)
-        if match:
-            return match.group(1)
+        if application != "confbridge":
+            continue
+
+        bridge = data.split(",", 1)[0].strip().lower()
+        if bridge == wanted_conference:
+            return channel
+
     return None
 
 
