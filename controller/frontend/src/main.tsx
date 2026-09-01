@@ -1,6 +1,342 @@
-import React from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Inviter, Registerer, SessionState, UserAgent } from 'sip.js';
+import './styles.css';
 
-// Existing application code remains unchanged above this render call.
+type State = 'ONLINE' | 'OFFLINE' | 'CALLING' | 'IN CALL' | 'BUSY' | 'MUTED';
+type ApiStation = { id: number; station_number: string; name: string; location: string | null; section_id: number; sip_extension: string; station_type: string; enabled: boolean; priority: number };
+type EndpointStatus = { sip_extension: string; status: 'REGISTERED' | 'UNREGISTERED'; asterisk_state: string };
+type Station = { id: string; dbId: number; name: string; state: State; sipExtension: string; location: string; priority: number; registered: boolean };
+type Participant = { id: string; name: string; state: 'CALLING' | 'LISTENING' | 'MUTED' | 'TALKING' };
+type ControllerStatus = 'CONNECTING' | 'REGISTERED' | 'IN CONFERENCE' | 'DISCONNECTED' | 'ERROR';
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const ASTERISK_HOST = import.meta.env.VITE_ASTERISK_HOST || window.location.hostname;
+const SIP_WS_URL = import.meta.env.VITE_SIP_WS_URL || `wss://${ASTERISK_HOST}:8089/ws`;
+const CONTROLLER_EXTENSION = import.meta.env.VITE_CONTROLLER_EXTENSION || '9999';
+const CONTROLLER_PASSWORD = import.meta.env.VITE_CONTROLLER_PASSWORD || 'tccs9999';
+const CONTROLLER_CONFERENCE_EXTENSION = import.meta.env.VITE_CONTROLLER_CONFERENCE_EXTENSION || '900';
+
+function mapStation(s: ApiStation): Station {
+  return { id: s.station_number, dbId: s.id, name: s.name, state: 'OFFLINE', sipExtension: s.sip_extension, location: s.location || '', priority: s.priority, registered: false };
+}
+
+function getStationState(endpoint: EndpointStatus | undefined, isCalling: boolean): State {
+  if (isCalling) return 'CALLING';
+  if (!endpoint || endpoint.status !== 'REGISTERED') return 'OFFLINE';
+  const state = (endpoint.asterisk_state || '').toLowerCase();
+  if (state.includes('busy')) return 'BUSY';
+  if (state.includes('in conference') || state.includes('in call')) return 'IN CALL';
+  if (state.includes('ringing')) return 'CALLING';
+  return 'ONLINE';
+}
+
+function App() {
+  const [stations, setStations] = useState<Station[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [modal, setModal] = useState<string | null>(null);
+  const [message, setMessage] = useState('Connecting to TCCS Controller API...');
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [layoutEdit, setLayoutEdit] = useState(false);
+  const [layoutSaving, setLayoutSaving] = useState(false);
+  const [callingIds, setCallingIds] = useState<Set<string>>(new Set());
+  const [controllerStatus, setControllerStatus] = useState<ControllerStatus>('CONNECTING');
+  const [controllerMuted, setControllerMuted] = useState(false);
+  const [conferenceBusyIds, setConferenceBusyIds] = useState<Set<string>>(new Set());
+
+  const online = useMemo(() => stations.filter(s => s.state === 'ONLINE').length, [stations]);
+  const userAgentRef = useRef<UserAgent | null>(null);
+  const registererRef = useRef<Registerer | null>(null);
+  const controllerSessionRef = useRef<any>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const joiningConferenceRef = useRef(false);
+
+  const attachRemoteAudio = (session: any) => {
+    const pc = session?.sessionDescriptionHandler?.peerConnection;
+    if (!pc) return;
+    const stream = new MediaStream();
+    pc.getReceivers().forEach((r: RTCRtpReceiver) => { if (r.track) stream.addTrack(r.track); });
+    if (!audioRef.current) {
+      audioRef.current = document.createElement('audio');
+      audioRef.current.autoplay = true;
+      audioRef.current.style.display = 'none';
+      document.body.appendChild(audioRef.current);
+    }
+    audioRef.current.srcObject = stream;
+    audioRef.current.play().catch(() => {});
+  };
+
+  const joinControllerConference = async (ua: UserAgent) => {
+    if (joiningConferenceRef.current || controllerSessionRef.current) return;
+    joiningConferenceRef.current = true;
+    try {
+      setControllerStatus('CONNECTING');
+      setMessage('Joining SECTION 01 conference...');
+      const target = UserAgent.makeURI(`sip:${CONTROLLER_CONFERENCE_EXTENSION}@${ASTERISK_HOST}`);
+      if (!target) throw new Error('Invalid conference target');
+      const inviter = new Inviter(ua, target, { sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } } });
+      controllerSessionRef.current = inviter;
+      inviter.stateChange.addListener((state: SessionState) => {
+        console.log('Controller conference session state:', state);
+        if (state === SessionState.Established) {
+          attachRemoteAudio(inviter);
+          setControllerStatus('IN CONFERENCE');
+          setMessage('Controller audio connected to SECTION 01');
+        } else if (state === SessionState.Terminated) {
+          controllerSessionRef.current = null;
+          joiningConferenceRef.current = false;
+          setControllerStatus('REGISTERED');
+          setControllerMuted(false);
+          setMessage('Controller conference disconnected');
+        }
+      });
+      await inviter.invite();
+    } catch (error) {
+      controllerSessionRef.current = null;
+      joiningConferenceRef.current = false;
+      setControllerStatus('ERROR');
+      setMessage(`Controller conference failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const connectController = async () => {
+    try {
+      if (userAgentRef.current) return;
+      setControllerStatus('CONNECTING');
+      const uri = UserAgent.makeURI(`sip:${CONTROLLER_EXTENSION}@${ASTERISK_HOST}`);
+      if (!uri) throw new Error('Invalid controller SIP URI');
+      const ua = new UserAgent({
+        uri,
+        authorizationUsername: CONTROLLER_EXTENSION,
+        authorizationPassword: CONTROLLER_PASSWORD,
+        transportOptions: { server: SIP_WS_URL },
+        sessionDescriptionHandlerFactoryOptions: { peerConnectionConfiguration: { iceServers: [] } },
+        delegate: {
+          onConnect: () => console.log('Controller WSS connected'),
+          onDisconnect: () => {
+            controllerSessionRef.current = null;
+            joiningConferenceRef.current = false;
+            setControllerStatus('DISCONNECTED');
+            setControllerMuted(false);
+            setMessage('Controller WSS disconnected');
+          }
+        }
+      });
+      userAgentRef.current = ua;
+      await ua.start();
+      const registerer = new Registerer(ua);
+      registererRef.current = registerer;
+      await registerer.register();
+      setControllerStatus('REGISTERED');
+      setMessage('Controller 9999 registered');
+      await joinControllerConference(ua);
+    } catch (error) {
+      userAgentRef.current = null;
+      registererRef.current = null;
+      controllerSessionRef.current = null;
+      joiningConferenceRef.current = false;
+      setControllerStatus('ERROR');
+      setMessage(`Controller SIP error: ${error instanceof Error ? error.message : 'Unable to connect'}`);
+    }
+  };
+
+  const disconnectController = async () => {
+    try {
+      if (controllerSessionRef.current) { try { await controllerSessionRef.current.bye(); } catch {} controllerSessionRef.current = null; }
+      joiningConferenceRef.current = false;
+      if (registererRef.current) { try { await registererRef.current.unregister(); } catch {} registererRef.current = null; }
+      if (userAgentRef.current) { try { await userAgentRef.current.stop(); } catch {} userAgentRef.current = null; }
+      setControllerStatus('DISCONNECTED');
+      setControllerMuted(false);
+      setMessage('Controller audio disconnected');
+    } catch {
+      setControllerStatus('ERROR');
+    }
+  };
+
+  const toggleControllerMute = () => {
+    const session = controllerSessionRef.current;
+    const pc = session?.sessionDescriptionHandler?.peerConnection;
+    if (!pc) { setMessage('Controller is not in conference'); return; }
+    const next = !controllerMuted;
+    pc.getSenders().forEach((s: RTCRtpSender) => { if (s.track?.kind === 'audio') s.track.enabled = !next; });
+    setControllerMuted(next);
+    setMessage(next ? 'Controller microphone muted' : 'Controller microphone unmuted');
+  };
+
+  useEffect(() => {
+    connectController();
+    return () => {
+      disconnectController();
+      if (audioRef.current) { audioRef.current.remove(); audioRef.current = null; }
+    };
+  }, []);
+
+  const loadStations = async () => {
+    setLoading(true); setApiError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/stations`);
+      if (!response.ok) throw new Error(`API returned HTTP ${response.status}`);
+      const data: ApiStation[] = await response.json();
+      setStations(data.map(mapStation).sort((a, b) => a.priority - b.priority));
+      setMessage(`Connected • ${data.length} stations loaded`);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : 'Unable to reach API');
+      setMessage('Controller API unavailable');
+    } finally { setLoading(false); }
+  };
+
+  const refreshEndpointStatus = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/asterisk/endpoints`);
+      if (!response.ok) throw new Error(`Asterisk API HTTP ${response.status}`);
+      const data: EndpointStatus[] = await response.json();
+      const endpointByExtension = new Map(data.map(e => [e.sip_extension, e]));
+      setStations(current => {
+        const next = current.map(s => {
+          const endpoint = endpointByExtension.get(s.sipExtension);
+          return { ...s, registered: endpoint?.status === 'REGISTERED', state: getStationState(endpoint, callingIds.has(s.id)) };
+        });
+        const activeConferenceExtensions = new Set(data.filter(e => (e.asterisk_state || '').toUpperCase().includes('IN CONFERENCE')).map(e => e.sip_extension));
+        setParticipants(currentParticipants => currentParticipants.filter(p => {
+          const station = next.find(s => s.id === p.id);
+          if (!station) return false;
+          const endpoint = endpointByExtension.get(station.sipExtension);
+          const endpointState = (endpoint?.asterisk_state || '').toUpperCase();
+          if (p.state === 'CALLING') return endpointState.includes('RINGING') || endpointState.includes('IN CALL') || endpointState.includes('IN CONFERENCE');
+          return activeConferenceExtensions.has(station.sipExtension);
+        }));
+        return next;
+      });
+      setApiError(null);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : 'Unable to read Asterisk status');
+    }
+  };
+
+  useEffect(() => { loadStations(); }, []);
+  useEffect(() => {
+    if (!stations.length) return;
+    refreshEndpointStatus();
+    const timer = window.setInterval(refreshEndpointStatus, 3000);
+    return () => window.clearInterval(timer);
+  }, [stations.length, callingIds]);
+
+  const beginLayoutEdit = () => { setLayoutEdit(true); setMessage('Station layout edit mode enabled • drag stations to reorder'); };
+  const cancelLayoutEdit = () => { setLayoutEdit(false); setDraggedId(null); loadStations(); setMessage('Station layout changes discarded'); };
+  const reorderStations = (fromId: string, toId: string) => {
+    if (!layoutEdit || fromId === toId) return;
+    setStations(current => {
+      const next = [...current];
+      const fromIndex = next.findIndex(s => s.id === fromId); const toIndex = next.findIndex(s => s.id === toId);
+      if (fromIndex < 0 || toIndex < 0) return current;
+      const [moved] = next.splice(fromIndex, 1); next.splice(toIndex, 0, moved);
+      return next.map((s, index) => ({ ...s, priority: (index + 1) * 10 }));
+    });
+    setMessage(`Station ${fromId} moved before station ${toId}`);
+  };
+
+  const saveLayout = async () => {
+    setLayoutSaving(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/stations/order`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ station_ids: stations.map(s => s.dbId) }) });
+      if (!response.ok) throw new Error((await response.text()) || `API returned HTTP ${response.status}`);
+      setLayoutEdit(false); setDraggedId(null); setMessage('Station layout saved successfully'); await loadStations();
+    } catch (error) { setMessage(`Layout save failed: ${error instanceof Error ? error.message : 'Unable to save station layout'}`); }
+    finally { setLayoutSaving(false); }
+  };
+
+  const callStation = async (station: Station) => {
+    if (layoutEdit || callingIds.has(station.id)) return;
+    if (!station.registered) { setMessage(`Station ${station.id} is unregistered`); return; }
+    if (participants.some(p => p.id === station.id)) { setMessage(`Station ${station.id} is already in the conference`); return; }
+    setCallingIds(current => new Set(current).add(station.id));
+    setParticipants(current => [...current, { id: station.id, name: station.name, state: 'CALLING' }]);
+    setStations(current => current.map(s => s.id === station.id ? { ...s, state: 'CALLING' } : s));
+    setMessage(`Calling station ${station.id}...`);
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/calls/stations/${station.dbId}`, { method: 'POST' });
+      if (!response.ok) {
+        let detail = 'Unable to originate call';
+        try { detail = (await response.json()).detail || detail; } catch { detail = await response.text() || detail; }
+        throw new Error(detail);
+      }
+      setMessage(`Station ${station.id} call originated and added to conference`);
+    } catch (error) {
+      setParticipants(current => current.filter(p => p.id !== station.id));
+      setStations(current => current.map(s => s.id === station.id ? { ...s, state: s.registered ? 'ONLINE' : 'OFFLINE' } : s));
+      setMessage(`Call failed: ${error instanceof Error ? error.message : 'Unable to originate call'}`);
+    } finally { setCallingIds(current => { const next = new Set(current); next.delete(station.id); return next; }); }
+  };
+
+  const addParticipant = (station: Station) => {
+    if (!station.registered) return setMessage(`Station ${station.id} is unregistered`);
+    setParticipants(current => current.some(p => p.id === station.id) ? current : [...current, { id: station.id, name: station.name, state: 'LISTENING' }]);
+    setMessage(`Station ${station.id} added to conference`); setModal(null);
+  };
+  const generalCall = () => { if (layoutEdit) return; const available = stations.filter(s => s.registered); setParticipants(available.map(s => ({ id: s.id, name: s.name, state: 'CALLING' }))); setMessage(`General call prepared for ${available.length} registered station(s)`); };
+
+  const toggleMute = async (id: string) => {
+    if (conferenceBusyIds.has(id)) return;
+    const participant = participants.find(p => p.id === id); const station = stations.find(s => s.id === id); if (!participant || !station) return;
+    const currentlyMuted = participant.state === 'MUTED';
+    setConferenceBusyIds(current => new Set(current).add(id));
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/conference/stations/${station.dbId}/${currentlyMuted ? 'unmute' : 'mute'}`, { method: 'POST' });
+      if (!response.ok) { let detail = 'Unable to change mute state'; try { detail = (await response.json()).detail || detail; } catch { detail = await response.text() || detail; } throw new Error(detail); }
+      setParticipants(current => current.map(p => p.id === id ? { ...p, state: currentlyMuted ? 'LISTENING' : 'MUTED' } : p));
+      setMessage(`${participant.name} ${currentlyMuted ? 'unmuted' : 'muted'}`);
+    } catch (error) { setMessage(`Mute failed: ${error instanceof Error ? error.message : 'Unable to change mute state'}`); }
+    finally { setConferenceBusyIds(current => { const next = new Set(current); next.delete(id); return next; }); }
+  };
+
+  const remove = async (id: string) => {
+    if (conferenceBusyIds.has(id)) return;
+    const participant = participants.find(p => p.id === id); const station = stations.find(s => s.id === id); if (!participant || !station) return;
+    setConferenceBusyIds(current => new Set(current).add(id));
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/conference/stations/${station.dbId}/hangup`, { method: 'POST' });
+      if (!response.ok) { let detail = 'Unable to hang up station'; try { detail = (await response.json()).detail || detail; } catch { detail = await response.text() || detail; } throw new Error(detail); }
+      setParticipants(current => current.filter(p => p.id !== id));
+      setStations(current => current.map(s => s.id === id ? { ...s, state: s.registered ? 'ONLINE' : 'OFFLINE' } : s));
+      setMessage(`Station ${id} disconnected from conference`);
+    } catch (error) { setMessage(`Hang up failed: ${error instanceof Error ? error.message : 'Unable to hang up station'}`); }
+    finally { setConferenceBusyIds(current => { const next = new Set(current); next.delete(id); return next; }); }
+  };
+
+  const statusClass = controllerStatus === 'IN CONFERENCE' ? 'controller-online' : controllerStatus === 'ERROR' ? 'controller-error' : 'controller-connecting';
+
+  return <div className="app">
+    <header className="topbar"><div><div className="brand">TCCS</div><div className="subtitle">Train Control Communication System</div></div><div className="top-status"><span>SECTION <b>01</b></span><span>CONTROLLER <b>C01</b></span><span className={apiError ? 'error' : 'ok'}>● {apiError ? 'API OFFLINE' : loading ? 'CONNECTING' : 'SYSTEM NORMAL'}</span></div></header>
+    <main>
+      <div className="heading"><div><h1>Controller Console</h1><p>Stage 2 • Controller UI • Live Asterisk Status</p></div><div className="toolbar"><button onClick={() => setModal('directory')}>Directory</button><button onClick={() => setModal('history')}>Call History</button><button onClick={() => setModal('settings')}>Settings</button></div></div>
+      {apiError && <div className="api-error"><b>Controller/Asterisk status unavailable.</b> {apiError} <button onClick={loadStations}>RETRY</button></div>}
+      <div className="controller-audio-panel"><div className="controller-audio-info"><div className="controller-audio-title">CONTROLLER AUDIO</div><div className="controller-audio-subtitle">SIP {CONTROLLER_EXTENSION} • SECTION 01</div></div><div className={`controller-status ${statusClass}`}><span className="status-dot">●</span>{controllerStatus}</div><div className="controller-audio-actions"><button onClick={toggleControllerMute} disabled={controllerStatus !== 'IN CONFERENCE'}>{controllerMuted ? 'UNMUTE' : 'MUTE'}</button><button onClick={disconnectController} disabled={controllerStatus === 'DISCONNECTED'}>DISCONNECT</button><button onClick={connectController} disabled={controllerStatus !== 'DISCONNECTED' && controllerStatus !== 'ERROR' && controllerStatus !== 'REGISTERED'}>CONNECT</button></div></div>
+      <div className="console-grid">
+        <section className="panel stations-panel"><div className="section-title"><div className="title-with-actions"><h2>Way Stations</h2><div className="layout-actions">{!layoutEdit ? <button className="icon-button" onClick={beginLayoutEdit} title="Edit station layout">✎</button> : <><button className="icon-button save-layout" onClick={saveLayout} disabled={layoutSaving} title="Save station layout">{layoutSaving ? '…' : '✓'}</button><button className="icon-button cancel-layout" onClick={cancelLayoutEdit} disabled={layoutSaving} title="Cancel layout changes">×</button></>}</div></div><span>{loading ? 'Loading...' : layoutEdit ? 'EDIT MODE • Drag stations to reorder' : `${online}/${stations.length} online`}</span></div>{loading ? <div className="empty">Loading station configuration from PostgreSQL...</div> : stations.length === 0 ? <div className="empty">No enabled stations configured</div> : <div className="station-grid">{stations.map(s => <button key={s.id} draggable={layoutEdit} className={`station ${s.state.toLowerCase().replace(' ', '-')} ${draggedId === s.id ? 'dragging' : ''} ${layoutEdit ? 'layout-edit' : ''}`} onDragStart={e => { if (!layoutEdit) { e.preventDefault(); return; } setDraggedId(s.id); }} onDragEnd={() => setDraggedId(null)} onDragOver={e => { if (layoutEdit) e.preventDefault(); }} onDrop={() => { if (layoutEdit && draggedId) reorderStations(draggedId, s.id); setDraggedId(null); }} onClick={() => callStation(s)} title={layoutEdit ? `Drag ${s.name} to reorder` : `${s.registered ? 'Call' : 'Station offline'} ${s.name}`}>{layoutEdit && <span className="drag-handle">⋮⋮</span>}<strong>{s.id}</strong><small>{s.name}</small><span>● {s.state}</span></button>)}</div>}</section>
+        <section className="panel conference-panel"><div className="section-title"><h2>Active Conference</h2><span>{participants.length ? `${participants.length} participant(s)` : 'No active conference'}</span></div>{participants.length === 0 ? <div className="empty">No active participants</div> : <div className="conference-table"><div className="conference-head"><span>STATION</span><span>NAME</span><span>ACTION</span></div>{participants.map(p => <div className="participant" key={p.id}><b>{p.id}</b><span>{p.name}</span><div className="participant-actions"><button disabled={conferenceBusyIds.has(p.id)} className={p.state === 'MUTED' ? 'muted-action' : ''} onClick={() => toggleMute(p.id)}>{conferenceBusyIds.has(p.id) ? '…' : p.state === 'MUTED' ? 'UNMUTE' : 'MUTE'}</button><button disabled={conferenceBusyIds.has(p.id)} className="hangup-action" onClick={() => remove(p.id)}>HANG UP</button></div></div>)}</div>}</section>
+      </div>
+      <div className="call-actions"><button className="primary" onClick={generalCall} disabled={!online || layoutEdit}>GENERAL CALL</button><button onClick={generalCall} disabled={!online || layoutEdit}>SECTION CALL</button><button onClick={() => setModal('group')} disabled={layoutEdit}>GROUP CALL</button><button onClick={() => setModal('add')} disabled={!stations.length || layoutEdit}>ADD SUBSCRIBER</button></div>
+      <div className="bottom-actions"><button onClick={() => setMessage('Hold control selected')} disabled={layoutEdit}>Hold</button><button onClick={() => setMessage('Transfer control selected')} disabled={layoutEdit}>Transfer</button><button onClick={() => setModal('recordings')} disabled={layoutEdit}>Recordings</button><button onClick={() => setModal('diagnostics')} disabled={layoutEdit}>Diagnostics</button><button className="emergency" onClick={() => setModal('emergency')} disabled={layoutEdit}>Emergency</button></div>
+      <div className="statusbar">{message}</div>
+    </main>
+    {modal && <Modal modal={modal} stations={stations} onClose={() => setModal(null)} onAdd={addParticipant} />}
+  </div>;
+}
+
+function Modal({ modal, stations, onClose, onAdd }: { modal: string; stations: Station[]; onClose: () => void; onAdd: (s: Station) => void }) {
+  if (modal === 'add') return <Overlay title="Add Subscriber" onClose={onClose}><p>Select a registered station.</p><div className="modal-list">{stations.map(s => <button key={s.id} disabled={!s.registered} onClick={() => onAdd(s)}>{s.id} — {s.name} — {s.state}</button>)}</div></Overlay>;
+  if (modal === 'directory') return <Overlay title="Directory" onClose={onClose}><div className="modal-list">{stations.map(s => <button key={s.id}>{s.id} — {s.name} — {s.state}</button>)}</div></Overlay>;
+  if (modal === 'group') return <Overlay title="Group Call" onClose={onClose}><p>Configured groups will be loaded from PostgreSQL in the backend phase.</p><div className="modal-list"><button onClick={onClose}>SECTION 01 GROUP</button></div></Overlay>;
+  if (modal === 'emergency') return <Overlay title="Emergency Call" onClose={onClose}><p><b>TEST MODE:</b> no emergency call is transmitted by this prototype.</p><p>The production implementation will connect this control to the validated emergency communication workflow.</p><button className="emergency" onClick={onClose}>ACTIVATE TEST</button></Overlay>;
+  const labels: Record<string, string> = { history: 'Call History', settings: 'Settings', recordings: 'Recordings', diagnostics: 'Diagnostics' };
+  return <Overlay title={labels[modal] || 'TCCS'} onClose={onClose}><p>This function is reserved for the backend integration phase.</p></Overlay>;
+}
+
+function Overlay({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return <div className="overlay" onClick={onClose}><div className="modal" onClick={e => e.stopPropagation()}><h3>{title}</h3>{children}<div className="modal-footer"><button onClick={onClose}>Close</button></div></div></div>;
+}
 
 createRoot(document.getElementById('root')!).render(<App />);
