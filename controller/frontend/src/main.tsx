@@ -24,7 +24,9 @@ function getStationState(endpoint: EndpointStatus | undefined, isCalling: boolea
  if (!endpoint || endpoint.status !== 'REGISTERED') return 'OFFLINE';
  const asteriskState = (endpoint.asterisk_state || '').toLowerCase();
  if (asteriskState.includes('busy')) return 'BUSY';
- if (asteriskState.includes('in use') || asteriskState.includes('ringing') || asteriskState.includes('up')) return 'IN CALL';
+ if (asteriskState.includes('in conference')) return 'IN CALL';
+ if (asteriskState.includes('ringing')) return 'CALLING';
+ if (asteriskState.includes('in call')) return 'IN CALL';
  return 'ONLINE';
 }
 
