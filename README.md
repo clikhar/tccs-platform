@@ -23,6 +23,3 @@ The controller UI/backend are being developed before integration with the Asteri
 
 This is a development project. It is not yet an operational railway safety/communications system and must not be deployed for operational use without appropriate engineering validation, testing, approvals and certification.
 
-## ChatGPT GitHub Connector Test
-
-This line confirms that ChatGPT can write to the repository.
