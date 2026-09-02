@@ -99,7 +99,7 @@ async def _enforce_single_controller_channel(channels_output: str) -> None:
     channels.sort(key=_channel_sequence)
     for channel in channels[:-1]:
         try:
-            await _run_cli("channel request hangup", channel)
+            await _run_cli(f"channel request hangup {channel}")
         except Exception:
             pass
 
