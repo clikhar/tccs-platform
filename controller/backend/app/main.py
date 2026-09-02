@@ -17,7 +17,7 @@ from .db import SessionLocal, get_db
 from .models import Section, Station
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.4.2")
+app = FastAPI(title="TCCS Controller API", version="0.4.3")
 
 allowed_origins = [
     "http://localhost:5173",
@@ -53,9 +53,11 @@ async def ensure_call_history_table() -> None:
                 originated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 answered_at TIMESTAMPTZ,
                 ended_at TIMESTAMPTZ,
-                duration_seconds INTEGER
+                duration_seconds INTEGER,
+                asterisk_channel VARCHAR(128)
             )
         """))
+        await db.execute(text("ALTER TABLE call_history ADD COLUMN IF NOT EXISTS asterisk_channel VARCHAR(128)"))
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_originated_at ON call_history(originated_at DESC)"))
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_target_station ON call_history(target_station_id)"))
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_status ON call_history(status)"))
@@ -118,24 +120,47 @@ async def list_groups(db: AsyncSession = Depends(get_db)):
 
 
 async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
-    """Create history records for live station calls entering controller 9999.
+    """Synchronize station->controller calls from live Asterisk channels.
 
-    The live channel is the station's PJSIP channel (for example PJSIP/1001),
-    not a PJSIP/9999 channel.  The station channel runs in tccs-stations and
-    enters SECTION01 through ConfBridge, so the channel extension itself is
-    the reliable source of the originating station extension.
+    A station call to 9999 is represented by the station PJSIP channel, e.g.
+    PJSIP/1001-..., in tccs-stations with dialed_extension=9999 and
+    application=ConfBridge.  Channel identity is stored so a later call from
+    the same station is never mistaken for the previous call.
     """
     channels = await active_channel_details()
     incoming = [
         channel for channel in channels
         if channel.get("context") == "tccs-stations"
+        and channel.get("dialed_extension") == "9999"
         and channel.get("application") == "CONFBRIDGE"
+        and re.fullmatch(r"10\d{2}", channel.get("extension", "").strip())
     ]
 
+    active_channels = {channel["channel"] for channel in incoming if channel.get("channel")}
+    now = datetime.now(timezone.utc)
+
+    # Close incoming records whose exact Asterisk channel is no longer live.
+    # This is what allows repeated calls from the same station to create a
+    # fresh history entry instead of being deduplicated forever.
+    await db.execute(text("""
+        UPDATE call_history
+        SET status = 'ENDED',
+            ended_at = :now,
+            duration_seconds = GREATEST(
+                0,
+                EXTRACT(EPOCH FROM (:now - COALESCE(answered_at, originated_at)))::INTEGER
+            )
+        WHERE call_type = 'INCOMING'
+          AND ended_at IS NULL
+          AND (
+              asterisk_channel IS NULL
+              OR asterisk_channel <> ALL(:active_channels)
+          )
+    """), {"now": now, "active_channels": list(active_channels)})
+
     for channel in incoming:
-        source_extension = channel.get("extension", "").strip()
-        if not re.fullmatch(r"10\d{2}", source_extension):
-            continue
+        source_extension = channel["extension"].strip()
+        channel_name = channel["channel"].strip()
 
         station_result = await db.execute(
             select(Station).where(
@@ -151,19 +176,13 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
             SELECT id
             FROM call_history
             WHERE call_type = 'INCOMING'
-              AND source_extension = :source_extension
-              AND target_station_id = :station_id
+              AND asterisk_channel = :asterisk_channel
               AND ended_at IS NULL
-            ORDER BY originated_at DESC
             LIMIT 1
-        """), {
-            "source_extension": source_extension,
-            "station_id": station.id,
-        })
+        """), {"asterisk_channel": channel_name})
         if existing.first() is not None:
             continue
 
-        now = datetime.now(timezone.utc)
         await db.execute(text("""
             INSERT INTO call_history (
                 call_type,
@@ -173,7 +192,8 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
                 target_name,
                 status,
                 originated_at,
-                answered_at
+                answered_at,
+                asterisk_channel
             ) VALUES (
                 'INCOMING',
                 :source_extension,
@@ -182,7 +202,8 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
                 :target_name,
                 'ANSWERED',
                 :now,
-                :now
+                :now,
+                :asterisk_channel
             )
         """), {
             "source_extension": source_extension,
@@ -190,7 +211,9 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
             "station_number": station.station_number,
             "target_name": station.name,
             "now": now,
+            "asterisk_channel": channel_name,
         })
+
     await db.commit()
 
 
