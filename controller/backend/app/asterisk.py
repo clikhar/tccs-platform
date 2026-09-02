@@ -17,29 +17,36 @@ def _parse_contacts(output: str) -> Dict[str, str]:
     return contacts
 
 
-def _parse_active_channels(output: str) -> Dict[str, str]:
-    """Map each PJSIP station extension to its live channel state.
-
-    `core show channels concise` has a stable `!`-delimited layout:
-    channel, context, extension, priority, state, application, data, ...
-    Using the concise form avoids depending on the human-readable column
-    spacing of `core show channels verbose`.
-    """
-    channels: Dict[str, str] = {}
+def _parse_active_channel_details(output: str) -> List[Dict[str, str]]:
+    """Return active PJSIP channels using the concise channel format."""
+    result: List[Dict[str, str]] = []
     for line in output.splitlines():
         fields = line.strip().split("!")
-        if len(fields) < 7:
+        if len(fields) < 8:
             continue
-
         channel = fields[0].strip()
         match = re.match(r"PJSIP/(\d+)-", channel, re.I)
         if not match:
             continue
+        result.append({
+            "channel": channel,
+            "extension": match.group(1),
+            "context": fields[1].strip(),
+            "state": fields[4].strip().upper(),
+            "application": fields[5].strip().upper(),
+            "data": fields[6].strip(),
+            "caller_id": fields[7].strip(),
+        })
+    return result
 
-        extension = match.group(1)
-        state_upper = fields[4].strip().upper()
-        app_upper = fields[5].strip().upper()
-        data_upper = fields[6].strip().upper()
+
+def _parse_active_channels(output: str) -> Dict[str, str]:
+    """Map each PJSIP extension to its live channel state."""
+    channels: Dict[str, str] = {}
+    for channel in _parse_active_channel_details(output):
+        extension = channel["extension"]
+        state_upper = channel["state"]
+        app_upper = channel["application"]
 
         if app_upper == "CONFBRIDGE":
             channels[extension] = "IN CONFERENCE"
@@ -64,6 +71,11 @@ async def _run_cli(*args: str) -> str:
     if process.returncode != 0:
         return ""
     return stdout.decode(errors="replace")
+
+
+async def active_channel_details() -> List[Dict[str, str]]:
+    output = await _run_cli("core show channels concise")
+    return _parse_active_channel_details(output)
 
 
 async def endpoint_status() -> List[Dict[str, Any]]:
