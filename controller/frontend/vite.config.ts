@@ -15,7 +15,7 @@ const tccsCallStatusLatency = () => ({
     );
 
     // Use the latest calling state everywhere in the polling/call handlers.
-    transformed = transformed.replace(/callingIds\\.has\\(/g, 'callingIdsRef.current.has(');
+    transformed = transformed.replace(/callingIds\.has\(/g, 'callingIdsRef.current.has(');
 
     // Poll continuously without restarting the interval whenever callingIds
     // changes. This prevents overlapping polling loops during call setup.
