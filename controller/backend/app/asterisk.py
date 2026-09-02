@@ -18,23 +18,30 @@ def _parse_contacts(output: str) -> Dict[str, str]:
 
 
 def _parse_active_channels(output: str) -> Dict[str, str]:
+    """Map each PJSIP station extension to its live channel state.
+
+    `core show channels concise` has a stable `!`-delimited layout:
+    channel, context, extension, priority, state, application, data, ...
+    Using the concise form avoids depending on the human-readable column
+    spacing of `core show channels verbose`.
+    """
     channels: Dict[str, str] = {}
     for line in output.splitlines():
-        # core show channels verbose contains Application and Data after the state.
-        # Only consider a station to be IN CALL when its own PJSIP channel is active.
-        match = re.match(
-            r"\s*PJSIP/(\d+)-\S+\s+\S+\s+\S+\s+\d+\s+(\S+)\s+(\S+)\s*(.*)$",
-            line,
-            re.I,
-        )
+        fields = line.strip().split("!")
+        if len(fields) < 7:
+            continue
+
+        channel = fields[0].strip()
+        match = re.match(r"PJSIP/(\d+)-", channel, re.I)
         if not match:
             continue
-        extension, state, application, data = match.groups()
-        state_upper = state.upper()
-        app_upper = application.upper()
-        data_upper = data.upper()
 
-        if app_upper.startswith("CONFBRIDGE") and "SECTION01" in data_upper:
+        extension = match.group(1)
+        state_upper = fields[4].strip().upper()
+        app_upper = fields[5].strip().upper()
+        data_upper = fields[6].strip().upper()
+
+        if app_upper == "CONFBRIDGE":
             channels[extension] = "IN CONFERENCE"
         elif state_upper in {"RING", "RINGING"}:
             channels[extension] = "RINGING"
@@ -63,7 +70,7 @@ async def endpoint_status() -> List[Dict[str, Any]]:
     try:
         contacts_output, channels_output = await asyncio.gather(
             _run_cli("pjsip show contacts"),
-            _run_cli("core show channels verbose"),
+            _run_cli("core show channels concise"),
         )
         if not contacts_output:
             return []
