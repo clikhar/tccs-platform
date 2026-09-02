@@ -32,6 +32,7 @@ def _parse_active_channel_details(output: str) -> List[Dict[str, str]]:
             "channel": channel,
             "extension": match.group(1),
             "context": fields[1].strip(),
+            "dialed_extension": fields[2].strip(),
             "state": fields[4].strip().upper(),
             "application": fields[5].strip().upper(),
             "data": fields[6].strip(),
