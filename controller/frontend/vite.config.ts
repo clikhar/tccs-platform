@@ -6,31 +6,30 @@ const tccsCallStatusLatency = () => ({
   transform(code: string, id: string) {
     if (!id.endsWith('/src/main.tsx')) return null;
 
-    // Keep the controller UI responsive while Asterisk is transitioning
-    // from originate -> ringing -> conference. The UI already has an
-    // optimistic CALLING participant; retain it long enough for Asterisk
-    // state to become authoritative.
+    // Asterisk status is polled frequently. Keep one stable ref containing
+    // the latest optimistic CALLING state so polling never captures a stale
+    // React closure and removes a newly originated station call.
     let transformed = code.replace(
-      'setInterval(refreshEndpointStatus,3000)',
-      'setInterval(refreshEndpointStatus,500)'
+      'const[callingIds,setCallingIds]=useState<Set<string>>(new Set());',
+      'const[callingIds,setCallingIds]=useState<Set<string>>(new Set());const callingIdsRef=useRef(callingIds);callingIdsRef.current=callingIds;'
     );
 
-    // refreshEndpointStatus runs asynchronously every 500 ms. Do not let
-    // an older request capture a stale callingIds Set and remove a newly
-    // originated call from the Active Conference list.
-    transformed = transformed.replace(
-      'const online=useMemo',
-      'const callingIdsRef=useRef(callingIds);callingIdsRef.current=callingIds;const online=useMemo'
-    );
-    transformed = transformed.replace(
-      'callingIds.has(station.id)',
-      'callingIdsRef.current.has(station.id)'
-    );
+    // Use the latest calling state everywhere in the polling/call handlers.
+    transformed = transformed.replace(/callingIds\\.has\\(/g, 'callingIdsRef.current.has(');
+
+    // Poll continuously without restarting the interval whenever callingIds
+    // changes. This prevents overlapping polling loops during call setup.
     transformed = transformed.replace(
       '[stations.length,callingIds]',
       '[stations.length]'
     );
+    transformed = transformed.replace(
+      'setInterval(refreshEndpointStatus,3000)',
+      'setInterval(refreshEndpointStatus,500)'
+    );
 
+    // Keep the optimistic CALLING participant visible until Asterisk has had
+    // time to transition from originate/ringing into the conference.
     transformed = transformed.replace(
       "finally{setCallingIds(current=>{const next=new Set(current);next.delete(station.id);return next;});}",
       "finally{window.setTimeout(()=>setCallingIds(current=>{const next=new Set(current);next.delete(station.id);return next;}),15000);}"
