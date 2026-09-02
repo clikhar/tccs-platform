@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .asterisk import endpoint_status
@@ -15,7 +15,7 @@ from .db import get_db
 from .models import Section, Station
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.3.8")
+app = FastAPI(title="TCCS Controller API", version="0.3.9")
 
 allowed_origins = [
     "http://localhost:5173",
@@ -58,6 +58,47 @@ async def reorder_stations(payload: dict = Body(...), db: AsyncSession = Depends
 async def list_sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
     result = await db.execute(select(Section).order_by(Section.id))
     return list(result.scalars().all())
+
+
+@app.get("/api/v1/groups")
+async def list_groups(db: AsyncSession = Depends(get_db)):
+    """Return enabled station groups and their enabled station members.
+
+    The membership table already exists in the application schema, but it is
+    intentionally kept as a lightweight association table rather than an ORM
+    entity. A parameterized SQL query keeps this API small and avoids changing
+    the existing station/group model contracts.
+    """
+    result = await db.execute(
+        text(
+            """
+            SELECT
+                g.id,
+                g.code,
+                g.name,
+                g.section_id,
+                COALESCE(
+                    json_agg(
+                        json_build_object(
+                            'id', s.id,
+                            'station_number', s.station_number,
+                            'name', s.name,
+                            'sip_extension', s.sip_extension
+                        )
+                        ORDER BY s.priority, s.station_number
+                    ) FILTER (WHERE s.id IS NOT NULL),
+                    '[]'::json
+                ) AS members
+            FROM station_groups g
+            LEFT JOIN station_group_members gm ON gm.group_id = g.id
+            LEFT JOIN stations s ON s.id = gm.station_id AND s.enabled = TRUE
+            WHERE g.enabled = TRUE
+            GROUP BY g.id, g.code, g.name, g.section_id
+            ORDER BY g.id
+            """
+        )
+    )
+    return [dict(row._mapping) for row in result]
 
 
 @app.get("/api/v1/asterisk/endpoints")
