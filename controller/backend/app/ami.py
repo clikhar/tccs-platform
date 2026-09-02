@@ -199,6 +199,36 @@ async def conference_channel(extension: str, conference: str = "SECTION01") -> O
     return None
 
 
+async def conference_channels(extension: str, conference: str = "SECTION01") -> List[str]:
+    """Return every live PJSIP channel for an extension in a ConfBridge."""
+    process = await asyncio.create_subprocess_exec(
+        ASTERISK_CLI, "-rx", "core show channels concise",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=AMI_TIMEOUT)
+    if process.returncode != 0:
+        detail = stderr.decode(errors="replace").strip()
+        raise RuntimeError(detail or "Unable to inspect active Asterisk channels")
+
+    wanted_prefix = f"PJSIP/{extension}-"
+    wanted_conference = conference.strip().lower()
+    channels: List[str] = []
+    for line in stdout.decode(errors="replace").splitlines():
+        fields = line.strip().split("!")
+        if len(fields) < 7:
+            continue
+        channel = fields[0].strip()
+        application = fields[5].strip().lower()
+        data = fields[6].strip()
+        if not channel.startswith(wanted_prefix) or application != "confbridge":
+            continue
+        bridge = data.split(",", 1)[0].strip().lower()
+        if bridge == wanted_conference:
+            channels.append(channel)
+    return channels
+
+
 async def hangup_station_channel(extension: str) -> Dict[str, str]:
     channel = await station_channel(extension)
     if not channel:
@@ -211,6 +241,17 @@ async def hangup_conference_channel(extension: str, conference: str = "SECTION01
     if not channel:
         raise RuntimeError(f"Station {extension} is not in conference {conference}")
     return await _run_action("\r\n".join(["Action: Hangup", f"Channel: {channel}"]))
+
+
+async def hangup_all_conference_channels(extension: str, conference: str = "SECTION01") -> int:
+    """Hang up all duplicate conference channels for one SIP extension."""
+    channels = await conference_channels(extension, conference)
+    for channel in channels:
+        try:
+            await _run_action("\r\n".join(["Action: Hangup", f"Channel: {channel}"]))
+        except Exception:
+            pass
+    return len(channels)
 
 
 async def mute_conference_channel(extension: str, conference: str = "SECTION01", mute: bool = True) -> Dict[str, str]:
