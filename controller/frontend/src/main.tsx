@@ -194,22 +194,46 @@ function App() {
       if (!response.ok) throw new Error(`Asterisk API HTTP ${response.status}`);
       const data: EndpointStatus[] = await response.json();
       const endpointByExtension = new Map(data.map(e => [e.sip_extension, e]));
-      setStations(current => {
-        const next = current.map(s => {
-          const endpoint = endpointByExtension.get(s.sipExtension);
-          return { ...s, registered: endpoint?.status === 'REGISTERED', state: getStationState(endpoint, callingIds.has(s.id)) };
-        });
-        const activeConferenceExtensions = new Set(data.filter(e => (e.asterisk_state || '').toUpperCase().includes('IN CONFERENCE')).map(e => e.sip_extension));
-        setParticipants(currentParticipants => currentParticipants.filter(p => {
-          const station = next.find(s => s.id === p.id);
-          if (!station) return false;
+
+      setStations(current => current.map(s => {
+        const endpoint = endpointByExtension.get(s.sipExtension);
+        return { ...s, registered: endpoint?.status === 'REGISTERED', state: getStationState(endpoint, callingIds.has(s.id)) };
+      }));
+
+      // The Asterisk status is the source of truth for the Active Conference dialog.
+      // This also discovers stations that joined conference 900 by dialing it directly,
+      // instead of relying only on the browser's callStation() action.
+      setParticipants(currentParticipants => {
+        const previousById = new Map(currentParticipants.map(p => [p.id, p]));
+        const nextParticipants: Participant[] = [];
+
+        for (const station of stations) {
           const endpoint = endpointByExtension.get(station.sipExtension);
-          const endpointState = (endpoint?.asterisk_state || '').toUpperCase();
-          if (p.state === 'CALLING') return endpointState.includes('RINGING') || endpointState.includes('IN CALL') || endpointState.includes('IN CONFERENCE');
-          return activeConferenceExtensions.has(station.sipExtension);
-        }));
-        return next;
+          const state = (endpoint?.asterisk_state || '').toUpperCase();
+          const active = state.includes('IN CONFERENCE');
+          const ringing = state.includes('RINGING');
+          const inCall = state.includes('IN CALL');
+
+          if (active) {
+            const previous = previousById.get(station.id);
+            nextParticipants.push({
+              id: station.id,
+              name: station.name,
+              state: previous?.state === 'MUTED' ? 'MUTED' : 'LISTENING'
+            });
+          } else if (callingIds.has(station.id) && (ringing || inCall)) {
+            const previous = previousById.get(station.id);
+            nextParticipants.push({
+              id: station.id,
+              name: station.name,
+              state: previous?.state === 'MUTED' ? 'MUTED' : 'CALLING'
+            });
+          }
+        }
+
+        return nextParticipants;
       });
+
       setApiError(null);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : 'Unable to read Asterisk status');
