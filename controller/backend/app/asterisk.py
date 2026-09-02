@@ -62,6 +62,48 @@ def _parse_active_channels(output: str) -> Dict[str, str]:
     return channels
 
 
+def _channel_sequence(channel: str) -> int:
+    """Extract the hexadecimal Asterisk channel sequence suffix."""
+    match = re.search(r"-([0-9a-f]+)$", channel, re.IGNORECASE)
+    return int(match.group(1), 16) if match else -1
+
+
+def _controller_channels(output: str, extension: str = "9999", conference: str = "SECTION01") -> List[str]:
+    wanted_prefix = f"PJSIP/{extension}-"
+    wanted_conference = conference.strip().lower()
+    channels: List[str] = []
+    for channel in _parse_active_channel_details(output):
+        name = channel["channel"]
+        if not name.startswith(wanted_prefix):
+            continue
+        if channel["application"] != "CONFBRIDGE":
+            continue
+        bridge = channel["data"].split(",", 1)[0].strip().lower()
+        if bridge == wanted_conference:
+            channels.append(name)
+    return channels
+
+
+async def _enforce_single_controller_channel(channels_output: str) -> None:
+    """Remove stale duplicate controller channels and keep the newest one.
+
+    Browser reloads or WebRTC disconnects can leave an old 9999 channel alive
+    long enough for the next page load to create another conference member.
+    The controller console is a single logical endpoint, so only the newest
+    SECTION01 controller channel is allowed to remain.
+    """
+    channels = _controller_channels(channels_output)
+    if len(channels) <= 1:
+        return
+
+    channels.sort(key=_channel_sequence)
+    for channel in channels[:-1]:
+        try:
+            await _run_cli("channel request hangup", channel)
+        except Exception:
+            pass
+
+
 async def _run_cli(*args: str) -> str:
     process = await asyncio.create_subprocess_exec(
         ASTERISK_CLI, "-rx", *args,
@@ -87,6 +129,12 @@ async def endpoint_status() -> List[Dict[str, Any]]:
         )
         if not contacts_output:
             return []
+
+        # The frontend polls this endpoint continuously. Use that existing
+        # health/status path to enforce the single-controller invariant even
+        # when a browser refresh creates a new SIP session before the old one
+        # has fully terminated.
+        await _enforce_single_controller_channel(channels_output)
 
         contacts = _parse_contacts(contacts_output)
         active_channels = _parse_active_channels(channels_output)
