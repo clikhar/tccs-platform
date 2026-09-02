@@ -129,14 +129,35 @@ async def originate_to_conference(extension: str, conference: str) -> Dict[str, 
             pass
 
 
-async def conference_channel(extension: str, conference: str = "SECTION01") -> Optional[str]:
-    """Find the live PJSIP station channel currently running ConfBridge.
+async def station_channel(extension: str) -> Optional[str]:
+    """Find the current PJSIP channel for a station, including ringing calls.
 
-    The previous implementation parsed `core show channels verbose`, whose
-    human-readable layout is not stable enough for reliable channel matching.
-    `core show channels concise` has a documented, delimiter-separated layout:
-    Channel!Context!Exten!Priority!State!Application!Data!...
+    A station that has not answered is not yet running ConfBridge, so the
+    previous conference-only lookup could not find it for the END action.
     """
+    process = await asyncio.create_subprocess_exec(
+        ASTERISK_CLI, "-rx", "core show channels concise",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=AMI_TIMEOUT)
+    if process.returncode != 0:
+        detail = stderr.decode(errors="replace").strip()
+        raise RuntimeError(detail or "Unable to inspect active Asterisk channels")
+
+    wanted_prefix = f"PJSIP/{extension}-"
+    for line in stdout.decode(errors="replace").splitlines():
+        fields = line.strip().split("!")
+        if len(fields) < 7:
+            continue
+        channel = fields[0].strip()
+        if channel.startswith(wanted_prefix):
+            return channel
+    return None
+
+
+async def conference_channel(extension: str, conference: str = "SECTION01") -> Optional[str]:
+    """Find the live PJSIP station channel currently running ConfBridge."""
     process = await asyncio.create_subprocess_exec(
         ASTERISK_CLI, "-rx", "core show channels concise",
         stdout=asyncio.subprocess.PIPE,
@@ -154,21 +175,24 @@ async def conference_channel(extension: str, conference: str = "SECTION01") -> O
         fields = line.strip().split("!")
         if len(fields) < 7:
             continue
-
         channel = fields[0].strip()
         application = fields[5].strip().lower()
         data = fields[6].strip()
-
         if not channel.startswith(wanted_prefix):
             continue
         if application != "confbridge":
             continue
-
         bridge = data.split(",", 1)[0].strip().lower()
         if bridge == wanted_conference:
             return channel
-
     return None
+
+
+async def hangup_station_channel(extension: str) -> Dict[str, str]:
+    channel = await station_channel(extension)
+    if not channel:
+        raise RuntimeError(f"Station {extension} has no active call to end")
+    return await _run_action("\r\n".join(["Action: Hangup", f"Channel: {channel}"]))
 
 
 async def hangup_conference_channel(extension: str, conference: str = "SECTION01") -> Dict[str, str]:
