@@ -129,12 +129,7 @@ async def originate_to_conference(extension: str, conference: str) -> Dict[str, 
             pass
 
 
-async def station_channel(extension: str) -> Optional[str]:
-    """Find the current PJSIP channel for a station, including ringing calls.
-
-    A station that has not answered is not yet running ConfBridge, so the
-    previous conference-only lookup could not find it for the END action.
-    """
+async def _find_station_channel_once(extension: str) -> Optional[str]:
     process = await asyncio.create_subprocess_exec(
         ASTERISK_CLI, "-rx", "core show channels concise",
         stdout=asyncio.subprocess.PIPE,
@@ -153,6 +148,22 @@ async def station_channel(extension: str) -> Optional[str]:
         channel = fields[0].strip()
         if channel.startswith(wanted_prefix):
             return channel
+    return None
+
+
+async def station_channel(extension: str) -> Optional[str]:
+    """Find a station's PJSIP channel, including an unanswered ringing call.
+
+    Originate is asynchronous, so the channel can appear a few hundred
+    milliseconds after the UI's CALLING state. Retry briefly so END works
+    even when the operator presses it immediately after CALLING appears.
+    """
+    for attempt in range(8):
+        channel = await _find_station_channel_once(extension)
+        if channel:
+            return channel
+        if attempt < 7:
+            await asyncio.sleep(0.15)
     return None
 
 
