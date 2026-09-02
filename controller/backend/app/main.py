@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from datetime import datetime, timezone
@@ -15,9 +16,10 @@ from .ami import hangup_station_channel, mute_conference_channel
 from .calls import call_station
 from .db import SessionLocal, get_db
 from .models import Section, Station
+from .recording import recording_loop
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.4.3")
+app = FastAPI(title="TCCS Controller API", version="0.5.0")
 
 allowed_origins = [
     "http://localhost:5173",
@@ -62,6 +64,23 @@ async def ensure_call_history_table() -> None:
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_target_station ON call_history(target_station_id)"))
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_status ON call_history(status)"))
         await db.commit()
+
+
+@app.on_event("startup")
+async def start_recording_worker() -> None:
+    app.state.recording_task = asyncio.create_task(recording_loop())
+
+
+@app.on_event("shutdown")
+async def stop_recording_worker() -> None:
+    task = getattr(app.state, "recording_task", None)
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @app.get("/api/v1/stations", response_model=List[StationOut])
@@ -120,13 +139,7 @@ async def list_groups(db: AsyncSession = Depends(get_db)):
 
 
 async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
-    """Synchronize station->controller calls from live Asterisk channels.
-
-    A station call to 9999 is represented by the station PJSIP channel, e.g.
-    PJSIP/1001-..., in tccs-stations with dialed_extension=9999 and
-    application=ConfBridge.  Channel identity is stored so a later call from
-    the same station is never mistaken for the previous call.
-    """
+    """Synchronize station->controller calls from live Asterisk channels."""
     channels = await active_channel_details()
     incoming = [
         channel for channel in channels
@@ -139,24 +152,25 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
     active_channels = {channel["channel"] for channel in incoming if channel.get("channel")}
     now = datetime.now(timezone.utc)
 
-    # Close incoming records whose exact Asterisk channel is no longer live.
-    # This is what allows repeated calls from the same station to create a
-    # fresh history entry instead of being deduplicated forever.
-    await db.execute(text("""
-        UPDATE call_history
-        SET status = 'ENDED',
-            ended_at = :now,
-            duration_seconds = GREATEST(
-                0,
-                EXTRACT(EPOCH FROM (:now - COALESCE(answered_at, originated_at)))::INTEGER
-            )
-        WHERE call_type = 'INCOMING'
-          AND ended_at IS NULL
-          AND (
-              asterisk_channel IS NULL
-              OR asterisk_channel <> ALL(:active_channels)
-          )
-    """), {"now": now, "active_channels": list(active_channels)})
+    # Use Python-side membership handling so an empty active channel list is
+    # unambiguous for asyncpg/PostgreSQL and never creates an invalid ALL().
+    result = await db.execute(text("""
+        SELECT id, asterisk_channel, originated_at, answered_at
+        FROM call_history
+        WHERE call_type = 'INCOMING' AND ended_at IS NULL
+    """))
+    for row in result:
+        if not row.asterisk_channel or row.asterisk_channel not in active_channels:
+            await db.execute(text("""
+                UPDATE call_history
+                SET status = 'ENDED',
+                    ended_at = :now,
+                    duration_seconds = GREATEST(
+                        0,
+                        EXTRACT(EPOCH FROM (:now - COALESCE(answered_at, originated_at)))::INTEGER
+                    )
+                WHERE id = :id
+            """), {"now": now, "id": row.id})
 
     for channel in incoming:
         source_extension = channel["extension"].strip()
