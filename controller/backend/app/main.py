@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .asterisk import endpoint_status
+from .asterisk import active_channel_details, endpoint_status
 from .ami import hangup_station_channel, mute_conference_channel
 from .calls import call_station
 from .db import SessionLocal, get_db
@@ -18,11 +19,22 @@ from .schemas import SectionOut, StationOut
 
 app = FastAPI(title="TCCS Controller API", version="0.4.1")
 
-allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://192.168.1.21:5173"]
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://192.168.1.21:5173",
+]
 frontend_origin = os.getenv("TCCS_FRONTEND_ORIGIN")
 if frontend_origin:
     allowed_origins.append(frontend_origin.rstrip("/"))
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=False, allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -78,9 +90,23 @@ async def list_sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
 @app.get("/api/v1/groups")
 async def list_groups(db: AsyncSession = Depends(get_db)):
     result = await db.execute(text("""
-        SELECT g.id, g.code, g.name, g.section_id,
-               COALESCE(json_agg(json_build_object('id', s.id, 'station_number', s.station_number, 'name', s.name, 'sip_extension', s.sip_extension)
-               ORDER BY s.priority, s.station_number) FILTER (WHERE s.id IS NOT NULL), '[]'::json) AS members
+        SELECT
+            g.id,
+            g.code,
+            g.name,
+            g.section_id,
+            COALESCE(
+                json_agg(
+                    json_build_object(
+                        'id', s.id,
+                        'station_number', s.station_number,
+                        'name', s.name,
+                        'sip_extension', s.sip_extension
+                    )
+                    ORDER BY s.priority, s.station_number
+                ) FILTER (WHERE s.id IS NOT NULL),
+                '[]'::json
+            ) AS members
         FROM station_groups g
         LEFT JOIN station_group_members gm ON gm.group_id = g.id
         LEFT JOIN stations s ON s.id = gm.station_id AND s.enabled = TRUE
@@ -91,34 +117,104 @@ async def list_groups(db: AsyncSession = Depends(get_db)):
     return [dict(row._mapping) for row in result]
 
 
-@app.get("/api/v1/asterisk/endpoints")
-async def asterisk_endpoints(db: AsyncSession = Depends(get_db)):
-    data = await endpoint_status()
-    now = datetime.now(timezone.utc)
-    for endpoint in data:
-        if endpoint.get("asterisk_state", "").upper().find("IN CONFERENCE") >= 0:
-            await db.execute(text("""
-                UPDATE call_history
-                SET status = 'ANSWERED', answered_at = COALESCE(answered_at, :now)
-                WHERE id = (
-                    SELECT id FROM call_history
-                    WHERE target_station_id = (SELECT id FROM stations WHERE sip_extension = :extension)
-                      AND ended_at IS NULL
-                      AND status = 'ORIGINATED'
-                    ORDER BY originated_at DESC LIMIT 1
-                )
-            """), {"extension": endpoint["sip_extension"], "now": now})
+async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
+    """Create history records for live calls originated by stations to 9999.
+
+    Station-to-controller calls enter the same SECTION01 conference through
+    extension 9999, so they do not pass through the controller's outbound
+    call API. We inspect the live PJSIP channel and use its CallerID to map
+    the originating station.
+    """
+    channels = await active_channel_details()
+    incoming = [
+        channel for channel in channels
+        if channel.get("extension") == "9999"
+        and channel.get("application") == "CONFBRIDGE"
+    ]
+    for channel in incoming:
+        caller_id = channel.get("caller_id", "")
+        match = re.search(r"(?:^|<)\s*(\d{3,})\s*>?$", caller_id)
+        if not match:
+            match = re.search(r"\b(10\d{2})\b", caller_id)
+        if not match:
+            continue
+        source_extension = match.group(1)
+        station_result = await db.execute(
+            select(Station).where(
+                Station.sip_extension == source_extension,
+                Station.enabled.is_(True),
+            )
+        )
+        station = station_result.scalar_one_or_none()
+        if station is None:
+            continue
+
+        existing = await db.execute(text("""
+            SELECT id
+            FROM call_history
+            WHERE call_type = 'INCOMING'
+              AND source_extension = :source_extension
+              AND target_station_id = :station_id
+              AND ended_at IS NULL
+            ORDER BY originated_at DESC
+            LIMIT 1
+        """), {
+            "source_extension": source_extension,
+            "station_id": station.id,
+        })
+        if existing.first() is not None:
+            continue
+
+        await db.execute(text("""
+            INSERT INTO call_history (
+                call_type,
+                source_extension,
+                target_station_id,
+                target_station_number,
+                target_name,
+                status
+            ) VALUES (
+                'INCOMING',
+                :source_extension,
+                :station_id,
+                :station_number,
+                :target_name,
+                'ANSWERED'
+            )
+        """), {
+            "source_extension": source_extension,
+            "station_id": station.id,
+            "station_number": station.station_number,
+            "target_name": station.name,
+        })
     await db.commit()
-    return data
+
+
+@app.get("/api/v1/asterisk/endpoints")
+async def asterisk_endpoints():
+    return await endpoint_status()
 
 
 @app.get("/api/v1/call-history")
 async def call_history(limit: int = 100, db: AsyncSession = Depends(get_db)):
     limit = max(1, min(limit, 500))
+    await _sync_incoming_controller_calls(db)
     result = await db.execute(text("""
-        SELECT id, call_type, source_extension, target_station_number, target_name,
-               group_code, status, originated_at, answered_at, ended_at, duration_seconds
-        FROM call_history ORDER BY originated_at DESC LIMIT :limit
+        SELECT
+            id,
+            call_type,
+            source_extension,
+            target_station_number,
+            target_name,
+            group_code,
+            status,
+            originated_at,
+            answered_at,
+            ended_at,
+            duration_seconds
+        FROM call_history
+        ORDER BY originated_at DESC
+        LIMIT :limit
     """), {"limit": limit})
     return [dict(row._mapping) for row in result]
 
@@ -128,6 +224,7 @@ async def call_station_endpoint(station_id: int, payload: Optional[dict] = Body(
     station = await db.get(Station, station_id)
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
+
     payload = payload or {}
     call_type = str(payload.get("call_type") or "DIRECT").upper()
     if call_type not in {"DIRECT", "GENERAL", "SECTION", "GROUP"}:
@@ -135,55 +232,94 @@ async def call_station_endpoint(station_id: int, payload: Optional[dict] = Body(
     group_code = payload.get("group_code")
     if group_code is not None:
         group_code = str(group_code)[:32]
+
     try:
         response = await call_station(station.sip_extension)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
     history_result = await db.execute(text("""
-        INSERT INTO call_history (call_type, source_extension, target_station_id, target_station_number, target_name, group_code, status)
-        VALUES (:call_type, '9999', :station_id, :station_number, :target_name, :group_code, 'ORIGINATED') RETURNING id
-    """), {"call_type":call_type,"station_id":station.id,"station_number":station.station_number,"target_name":station.name,"group_code":group_code})
+        INSERT INTO call_history (
+            call_type, source_extension, target_station_id,
+            target_station_number, target_name, group_code, status
+        ) VALUES (
+            :call_type, '9999', :station_id,
+            :station_number, :target_name, :group_code, 'ORIGINATED'
+        )
+        RETURNING id
+    """), {
+        "call_type": call_type,
+        "station_id": station.id,
+        "station_number": station.station_number,
+        "target_name": station.name,
+        "group_code": group_code,
+    })
     history = history_result.first()
     await db.commit()
-    return {"status":"ORIGINATED","station_id":station.id,"sip_extension":station.sip_extension,"history_id":history.id if history else None,"ami_response":response}
+
+    return {
+        "status": "ORIGINATED",
+        "station_id": station.id,
+        "sip_extension": station.sip_extension,
+        "history_id": history.id if history else None,
+        "ami_response": response,
+    }
 
 
 @app.post("/api/v1/conference/stations/{station_id}/mute")
 async def mute_station(station_id: int, db: AsyncSession = Depends(get_db)):
     station = await db.get(Station, station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404, detail="Station not found")
-    try: response = await mute_conference_channel(station.sip_extension, "SECTION01", True)
-    except Exception as exc: raise HTTPException(status_code=409, detail=str(exc))
-    return {"status":"MUTED","station_id":station.id,"sip_extension":station.sip_extension,"ami_response":response}
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    try:
+        response = await mute_conference_channel(station.sip_extension, "SECTION01", True)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "MUTED", "station_id": station.id, "sip_extension": station.sip_extension, "ami_response": response}
 
 
 @app.post("/api/v1/conference/stations/{station_id}/unmute")
 async def unmute_station(station_id: int, db: AsyncSession = Depends(get_db)):
     station = await db.get(Station, station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404, detail="Station not found")
-    try: response = await mute_conference_channel(station.sip_extension, "SECTION01", False)
-    except Exception as exc: raise HTTPException(status_code=409, detail=str(exc))
-    return {"status":"UNMUTED","station_id":station.id,"sip_extension":station.sip_extension,"ami_response":response}
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    try:
+        response = await mute_conference_channel(station.sip_extension, "SECTION01", False)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "UNMUTED", "station_id": station.id, "sip_extension": station.sip_extension, "ami_response": response}
 
 
 @app.post("/api/v1/conference/stations/{station_id}/hangup")
 async def hangup_station(station_id: int, db: AsyncSession = Depends(get_db)):
     station = await db.get(Station, station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404, detail="Station not found")
-    try: response = await hangup_station_channel(station.sip_extension)
-    except Exception as exc: raise HTTPException(status_code=409, detail=str(exc))
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    try:
+        response = await hangup_station_channel(station.sip_extension)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
     ended_at = datetime.now(timezone.utc)
     await db.execute(text("""
-        UPDATE call_history SET status='ENDED', ended_at=:ended_at,
-        duration_seconds=GREATEST(0, EXTRACT(EPOCH FROM (:ended_at - COALESCE(answered_at, originated_at)))::INTEGER)
-        WHERE id=(SELECT id FROM call_history WHERE target_station_id=:station_id AND ended_at IS NULL ORDER BY originated_at DESC LIMIT 1)
-    """), {"station_id":station.id,"ended_at":ended_at})
+        UPDATE call_history
+        SET status = 'ENDED',
+            ended_at = :ended_at,
+            duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM (:ended_at - COALESCE(answered_at, originated_at)))::INTEGER)
+        WHERE id = (
+            SELECT id FROM call_history
+            WHERE target_station_id = :station_id AND ended_at IS NULL
+            ORDER BY originated_at DESC
+            LIMIT 1
+        )
+    """), {"station_id": station.id, "ended_at": ended_at})
     await db.commit()
-    return {"status":"HUNG_UP","station_id":station.id,"sip_extension":station.sip_extension,"ami_response":response}
+    return {"status": "HUNG_UP", "station_id": station.id, "sip_extension": station.sip_extension, "ami_response": response}
 
 
 @app.get("/api/v1/stations/{station_id}", response_model=StationOut)
 async def get_station(station_id: int, db: AsyncSession = Depends(get_db)) -> Station:
     station = await db.get(Station, station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404, detail="Station not found")
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
     return station
