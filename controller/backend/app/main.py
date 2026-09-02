@@ -17,7 +17,7 @@ from .db import SessionLocal, get_db
 from .models import Section, Station
 from .schemas import SectionOut, StationOut
 
-app = FastAPI(title="TCCS Controller API", version="0.4.1")
+app = FastAPI(title="TCCS Controller API", version="0.4.2")
 
 allowed_origins = [
     "http://localhost:5173",
@@ -118,27 +118,25 @@ async def list_groups(db: AsyncSession = Depends(get_db)):
 
 
 async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
-    """Create history records for live calls originated by stations to 9999.
+    """Create history records for live station calls entering controller 9999.
 
-    Station-to-controller calls enter the same SECTION01 conference through
-    extension 9999, so they do not pass through the controller's outbound
-    call API. We inspect the live PJSIP channel and use its CallerID to map
-    the originating station.
+    The live channel is the station's PJSIP channel (for example PJSIP/1001),
+    not a PJSIP/9999 channel.  The station channel runs in tccs-stations and
+    enters SECTION01 through ConfBridge, so the channel extension itself is
+    the reliable source of the originating station extension.
     """
     channels = await active_channel_details()
     incoming = [
         channel for channel in channels
-        if channel.get("extension") == "9999"
+        if channel.get("context") == "tccs-stations"
         and channel.get("application") == "CONFBRIDGE"
     ]
+
     for channel in incoming:
-        caller_id = channel.get("caller_id", "")
-        match = re.search(r"(?:^|<)\s*(\d{3,})\s*>?$", caller_id)
-        if not match:
-            match = re.search(r"\b(10\d{2})\b", caller_id)
-        if not match:
+        source_extension = channel.get("extension", "").strip()
+        if not re.fullmatch(r"10\d{2}", source_extension):
             continue
-        source_extension = match.group(1)
+
         station_result = await db.execute(
             select(Station).where(
                 Station.sip_extension == source_extension,
@@ -165,6 +163,7 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
         if existing.first() is not None:
             continue
 
+        now = datetime.now(timezone.utc)
         await db.execute(text("""
             INSERT INTO call_history (
                 call_type,
@@ -172,20 +171,25 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
                 target_station_id,
                 target_station_number,
                 target_name,
-                status
+                status,
+                originated_at,
+                answered_at
             ) VALUES (
                 'INCOMING',
                 :source_extension,
                 :station_id,
                 :station_number,
                 :target_name,
-                'ANSWERED'
+                'ANSWERED',
+                :now,
+                :now
             )
         """), {
             "source_extension": source_extension,
             "station_id": station.id,
             "station_number": station.station_number,
             "target_name": station.name,
+            "now": now,
         })
     await db.commit()
 
