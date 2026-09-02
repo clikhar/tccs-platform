@@ -15,9 +15,20 @@ const tccsCallStatusLatency = () => ({
       'setInterval(refreshEndpointStatus,500)'
     );
 
+    // refreshEndpointStatus runs asynchronously every 500 ms. Do not let
+    // an older request capture a stale callingIds Set and remove a newly
+    // originated call from the Active Conference list.
     transformed = transformed.replace(
-      "else if (callingIds.has(station.id) && (ringing || inCall)) {",
-      "else if (callingIds.has(station.id)) {"
+      'const online=useMemo',
+      'const callingIdsRef=useRef(callingIds);callingIdsRef.current=callingIds;const online=useMemo'
+    );
+    transformed = transformed.replace(
+      'callingIds.has(station.id)',
+      'callingIdsRef.current.has(station.id)'
+    );
+    transformed = transformed.replace(
+      '[stations.length,callingIds]',
+      '[stations.length]'
     );
 
     transformed = transformed.replace(
