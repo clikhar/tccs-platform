@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .asterisk import active_channel_details
@@ -187,15 +188,42 @@ async def update_section(section_id: int, payload: dict = Body(...), db: AsyncSe
 
 @router.delete("/sections/{section_id}")
 async def delete_section(section_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
-    used = await db.execute(text("SELECT COUNT(*) FROM stations WHERE section_id=:id"), {"id": section_id})
-    if int(used.scalar_one()) > 0:
-        raise HTTPException(status_code=409, detail="Section is assigned to one or more stations; reassign the stations before deleting it")
-    result = await db.execute(text("DELETE FROM sections WHERE id=:id RETURNING id,code,name"), {"id": section_id})
-    row = result.first()
-    if row is None:
+    result = await db.execute(text("SELECT id,code,name FROM sections WHERE id=:id"), {"id": section_id})
+    section = result.first()
+    if section is None:
         raise HTTPException(status_code=404, detail="Section not found")
-    await db.commit()
-    return {"status": "DELETED", "id": row.id, "code": row.code, "name": row.name}
+
+    checks = [
+        ("stations", "SELECT COUNT(*) FROM stations WHERE section_id=:id", "station(s)"),
+        ("controllers", "SELECT COUNT(*) FROM controllers WHERE section_id=:id", "controller(s)"),
+        ("station groups", "SELECT COUNT(*) FROM station_groups WHERE section_id=:id", "station group(s)"),
+    ]
+    for label, query, noun in checks:
+        try:
+            used = await db.execute(text(query), {"id": section_id})
+            count = int(used.scalar_one())
+        except Exception:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail="Unable to check section dependencies")
+        if count > 0:
+            raise HTTPException(status_code=409, detail=f"Cannot remove section {section.code}: it is assigned to {count} {noun}; reassign or remove those references first")
+
+    try:
+        deleted = await db.execute(text("DELETE FROM sections WHERE id=:id RETURNING id,code,name"), {"id": section_id})
+        row = deleted.first()
+        if row is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Section not found")
+        await db.commit()
+        return {"status": "DELETED", "id": row.id, "code": row.code, "name": row.name}
+    except HTTPException:
+        raise
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"Cannot remove section {section.code}: it is still referenced by another record")
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Unable to remove section {section.code}: {str(exc)}")
 
 
 @router.get("/station-types")
@@ -252,13 +280,23 @@ async def delete_station_type(type_id: int, db: AsyncSession = Depends(get_db), 
         raise HTTPException(status_code=404, detail="Station type not found")
     used = await db.execute(text("SELECT COUNT(*) FROM stations WHERE station_type=:code"), {"code": row.code})
     if int(used.scalar_one()) > 0:
-        raise HTTPException(status_code=409, detail="Station type is assigned to one or more stations; reassign the stations before deleting it")
-    deleted = await db.execute(text("DELETE FROM station_types WHERE id=:id RETURNING id,code"), {"id": type_id})
-    deleted_row = deleted.first()
-    if deleted_row is None:
-        raise HTTPException(status_code=404, detail="Station type not found")
-    await db.commit()
-    return {"status": "DELETED", "id": deleted_row.id, "code": deleted_row.code}
+        raise HTTPException(status_code=409, detail=f"Cannot remove station type {row.code}: it is assigned to one or more stations; reassign them first")
+    try:
+        deleted = await db.execute(text("DELETE FROM station_types WHERE id=:id RETURNING id,code"), {"id": type_id})
+        deleted_row = deleted.first()
+        if deleted_row is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Station type not found")
+        await db.commit()
+        return {"status": "DELETED", "id": deleted_row.id, "code": deleted_row.code}
+    except HTTPException:
+        raise
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"Cannot remove station type {row.code}: it is still referenced by another record")
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Unable to remove station type {row.code}: {str(exc)}")
 
 
 @router.get("/stations")
@@ -347,8 +385,12 @@ async def delete_master_station(station_id: int, db: AsyncSession = Depends(get_
     channels = await active_channel_details()
     if any(c.get("extension") == station.sip_extension and c.get("channel") for c in channels):
         raise HTTPException(status_code=409, detail="Station has an active call; disconnect it before removing the subscriber")
-    await db.execute(text("DELETE FROM stations WHERE id=:id"), {"id": station_id})
-    await db.commit()
+    try:
+        await db.execute(text("DELETE FROM stations WHERE id=:id"), {"id": station_id})
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"Cannot remove subscriber {station.station_number}: it is referenced by another record")
     return {"status": "DELETED", "station_id": station.id, "station_number": station.station_number}
 
 
