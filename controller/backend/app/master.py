@@ -103,8 +103,18 @@ async def ensure_master_tables(db: AsyncSession) -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """))
+    await db.execute(text("""
+        CREATE TABLE IF NOT EXISTS controllers (
+            id BIGSERIAL PRIMARY KEY,
+            code VARCHAR(32) NOT NULL UNIQUE,
+            name VARCHAR(128) NOT NULL,
+            section_id BIGINT REFERENCES sections(id),
+            enabled BOOLEAN NOT NULL DEFAULT TRUE
+        )
+    """))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_station_types_enabled ON station_types(enabled)"))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username)"))
+    await db.execute(text("CREATE INDEX IF NOT EXISTS idx_controllers_section ON controllers(section_id)"))
     existing = await db.execute(text("SELECT id FROM admin_users WHERE username=:username"), {"username": DEFAULT_ADMIN_USER})
     if existing.first() is None:
         await db.execute(text("INSERT INTO admin_users (username,password_hash,role,enabled) VALUES (:username,:password_hash,'ADMIN',TRUE)"), {
@@ -224,6 +234,113 @@ async def delete_section(section_id: int, db: AsyncSession = Depends(get_db), ad
     except Exception as exc:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Unable to remove section {section.code}: {str(exc)}")
+
+
+@router.get("/controllers")
+async def master_controllers(db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("""
+        SELECT c.id,c.code,c.name,c.section_id,c.enabled,
+               s.code AS section_code,s.name AS section_name
+        FROM controllers c
+        LEFT JOIN sections s ON s.id=c.section_id
+        ORDER BY c.code
+    """))
+    return [dict(row._mapping) for row in result]
+
+
+@router.post("/controllers")
+async def create_controller(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    code = str(payload.get("code") or "").strip().upper()
+    name = str(payload.get("name") or "").strip()
+    section_id = payload.get("section_id")
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{1,31}", code):
+        raise HTTPException(status_code=400, detail="Controller code must be 2-32 characters using A-Z, 0-9, _ or -")
+    if not name:
+        raise HTTPException(status_code=400, detail="Controller name is required")
+    if section_id in (None, ""):
+        section_id = None
+    else:
+        try:
+            section_id = int(section_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Valid section_id is required")
+        section = await db.execute(text("SELECT id FROM sections WHERE id=:id"), {"id": section_id})
+        if section.first() is None:
+            raise HTTPException(status_code=400, detail="Section not found")
+    try:
+        result = await db.execute(text("""
+            INSERT INTO controllers(code,name,section_id,enabled)
+            VALUES(:code,:name,:section_id,:enabled)
+            RETURNING id,code,name,section_id,enabled
+        """), {"code": code, "name": name[:128], "section_id": section_id, "enabled": bool(payload.get("enabled", True))})
+        await db.commit()
+        return dict(result.first()._mapping)
+    except Exception as exc:
+        await db.rollback()
+        if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Controller code already exists")
+        raise
+
+
+@router.put("/controllers/{controller_id}")
+async def update_controller(controller_id: int, payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("SELECT id,code,name,section_id,enabled FROM controllers WHERE id=:id"), {"id": controller_id})
+    current = result.first()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    code = str(payload.get("code", current.code) or "").strip().upper()
+    name = str(payload.get("name", current.name) or "").strip()
+    section_id = payload.get("section_id", current.section_id)
+    if section_id in (None, ""):
+        section_id = None
+    else:
+        try:
+            section_id = int(section_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Valid section_id is required")
+        section = await db.execute(text("SELECT id FROM sections WHERE id=:id"), {"id": section_id})
+        if section.first() is None:
+            raise HTTPException(status_code=400, detail="Section not found")
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{1,31}", code) or not name:
+        raise HTTPException(status_code=400, detail="Valid controller code and name are required")
+    try:
+        result = await db.execute(text("""
+            UPDATE controllers
+            SET code=:code,name=:name,section_id=:section_id,enabled=:enabled
+            WHERE id=:id
+            RETURNING id,code,name,section_id,enabled
+        """), {"id": controller_id, "code": code, "name": name[:128], "section_id": section_id, "enabled": bool(payload.get("enabled", current.enabled))})
+        await db.commit()
+        return dict(result.first()._mapping)
+    except Exception as exc:
+        await db.rollback()
+        if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Controller code already exists")
+        raise
+
+
+@router.delete("/controllers/{controller_id}")
+async def delete_controller(controller_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("SELECT id,code,name FROM controllers WHERE id=:id"), {"id": controller_id})
+    controller = result.first()
+    if controller is None:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    try:
+        deleted = await db.execute(text("DELETE FROM controllers WHERE id=:id RETURNING id,code,name"), {"id": controller_id})
+        row = deleted.first()
+        if row is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Controller not found")
+        await db.commit()
+        return {"status":"DELETED","id":row.id,"code":row.code,"name":row.name}
+    except HTTPException:
+        raise
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"Cannot remove controller {controller.code}: it is still referenced by another record")
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Unable to remove controller {controller.code}: {str(exc)}")
 
 
 @router.get("/station-types")
@@ -399,4 +516,5 @@ async def master_summary(db: AsyncSession = Depends(get_db), admin: dict = Depen
     sections = await db.execute(text("SELECT COUNT(*) FROM sections WHERE enabled"))
     stations = await db.execute(text("SELECT COUNT(*) FROM stations WHERE enabled"))
     types = await db.execute(text("SELECT COUNT(*) FROM station_types WHERE enabled"))
-    return {"sections": int(sections.scalar_one()), "stations": int(stations.scalar_one()), "station_types": int(types.scalar_one())}
+    controllers = await db.execute(text("SELECT COUNT(*) FROM controllers WHERE enabled"))
+    return {"sections": int(sections.scalar_one()), "stations": int(stations.scalar_one()), "station_types": int(types.scalar_one()), "controllers": int(controllers.scalar_one())}
