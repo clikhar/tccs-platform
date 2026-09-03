@@ -15,11 +15,13 @@ from .asterisk import active_channel_details, endpoint_status
 from .ami import hangup_station_channel, mute_conference_channel
 from .calls import call_station
 from .db import SessionLocal, get_db
+from .master import ensure_master_tables, router as master_router
 from .models import Section, Station
 from .recording import recording_loop
 from .schemas import SectionOut, StationOut
 
 app = FastAPI(title="TCCS Controller API", version="0.5.0")
+app.include_router(master_router)
 
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://192.168.1.21:5173"]
 frontend_origin = os.getenv("TCCS_FRONTEND_ORIGIN")
@@ -52,6 +54,11 @@ async def ensure_call_history_table() -> None:
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_target_station ON call_history(target_station_id)"))
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_call_history_status ON call_history(status)"))
         await db.commit()
+
+@app.on_event("startup")
+async def ensure_master_schema() -> None:
+    async with SessionLocal() as db:
+        await ensure_master_tables(db)
 
 @app.on_event("startup")
 async def start_recording_worker() -> None:
