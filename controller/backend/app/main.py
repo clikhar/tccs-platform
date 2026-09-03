@@ -15,7 +15,7 @@ from .asterisk import active_channel_details, endpoint_status
 from .ami import hangup_station_channel, mute_conference_channel
 from .calls import call_station
 from .db import SessionLocal, get_db
-from .master import ensure_master_tables, router as master_router
+from .master import ensure_master_tables, require_admin, router as master_router
 from .models import Section, Station
 from .recording import recording_loop
 from .schemas import SectionOut, StationOut
@@ -200,12 +200,12 @@ def _validate_station_payload(payload:dict,existing_id:Optional[int]=None)->dict
     return {"station_number":station_number[:32],"name":name[:128],"location":(str(payload.get("location") or "").strip() or None)[:256],"section_id":section_id,"sip_extension":sip[:64],"station_type":str(payload.get("station_type") or "WAY_STATION")[:32],"enabled":bool(payload.get("enabled",True)),"existing_id":existing_id}
 
 @app.get("/api/v1/station-management")
-async def manage_list_stations(db:AsyncSession=Depends(get_db)):
+async def manage_list_stations(db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     result=await db.execute(select(Station).order_by(Station.priority,Station.station_number))
     return [dict(s.__dict__) | {"_sa_instance_state":None} for s in result.scalars().all()]
 
 @app.post("/api/v1/station-management")
-async def manage_create_station(payload:dict=Body(...),db:AsyncSession=Depends(get_db)):
+async def manage_create_station(payload:dict=Body(...),db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     data=_validate_station_payload(payload)
     section=await db.get(Section,data["section_id"])
     if section is None: raise HTTPException(status_code=400,detail="Section not found")
@@ -217,7 +217,7 @@ async def manage_create_station(payload:dict=Body(...),db:AsyncSession=Depends(g
     return station
 
 @app.put("/api/v1/station-management/{station_id}")
-async def manage_update_station(station_id:int,payload:dict=Body(...),db:AsyncSession=Depends(get_db)):
+async def manage_update_station(station_id:int,payload:dict=Body(...),db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     station=await db.get(Station,station_id)
     if station is None: raise HTTPException(status_code=404,detail="Station not found")
     merged={"station_number":payload.get("station_number",station.station_number),"name":payload.get("name",station.name),"location":payload.get("location",station.location),"section_id":payload.get("section_id",station.section_id),"sip_extension":payload.get("sip_extension",station.sip_extension),"station_type":payload.get("station_type",station.station_type),"enabled":payload.get("enabled",station.enabled)}
@@ -231,7 +231,7 @@ async def manage_update_station(station_id:int,payload:dict=Body(...),db:AsyncSe
     return station
 
 @app.delete("/api/v1/station-management/{station_id}")
-async def manage_delete_station(station_id:int,db:AsyncSession=Depends(get_db)):
+async def manage_delete_station(station_id:int,db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     station=await db.get(Station,station_id)
     if station is None: raise HTTPException(status_code=404,detail="Station not found")
     channels=await active_channel_details()
