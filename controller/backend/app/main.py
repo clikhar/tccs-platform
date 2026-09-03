@@ -19,9 +19,11 @@ from .master import ensure_master_tables, require_admin, router as master_router
 from .models import Section, Station
 from .recording import recording_loop
 from .schemas import SectionOut, StationOut
+from .emergency import ensure_emergency_tables, router as emergency_router
 
 app = FastAPI(title="TCCS Controller API", version="0.5.0")
 app.include_router(master_router)
+app.include_router(emergency_router)
 
 allowed_origins = [
     "http://localhost:5173",
@@ -64,6 +66,11 @@ async def ensure_call_history_table() -> None:
 async def ensure_master_schema() -> None:
     async with SessionLocal() as db:
         await ensure_master_tables(db)
+
+@app.on_event("startup")
+async def ensure_emergency_schema() -> None:
+    async with SessionLocal() as db:
+        await ensure_emergency_tables(db)
 
 @app.on_event("startup")
 async def start_recording_worker() -> None:
@@ -130,10 +137,7 @@ async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
         if station is None: continue
         existing=await db.execute(text("SELECT id FROM call_history WHERE call_type='INCOMING' AND asterisk_channel=:asterisk_channel AND ended_at IS NULL LIMIT 1"),{"asterisk_channel":channel_name})
         if existing.first() is not None: continue
-        await db.execute(text("""
-            INSERT INTO call_history (call_type,source_extension,target_station_id,target_station_number,target_name,status,originated_at,answered_at,asterisk_channel)
-            VALUES ('INCOMING',:source_extension,:station_id,:station_number,:target_name,'ANSWERED',:now,:now,:asterisk_channel)
-        """),{"source_extension":source_extension,"station_id":station.id,"station_number":station.station_number,"target_name":station.name,"now":now,"asterisk_channel":channel_name})
+        await db.execute(text("INSERT INTO call_history (call_type,source_extension,target_station_id,target_station_number,target_name,status,originated_at,answered_at,asterisk_channel) VALUES ('INCOMING',:source_extension,:station_id,:station_number,:target_name,'ANSWERED',:now,:now,:asterisk_channel)"),{"source_extension":source_extension,"station_id":station.id,"station_number":station.station_number,"target_name":station.name,"now":now,"asterisk_channel":channel_name})
     await db.commit()
 
 @app.get("/api/v1/asterisk/endpoints")
@@ -191,8 +195,6 @@ async def get_station(station_id:int,db:AsyncSession=Depends(get_db))->Station:
     if station is None or not station.enabled: raise HTTPException(status_code=404,detail="Station not found")
     return station
 
-# Subscriber / station management. This API deliberately uses a separate prefix
-# so it cannot conflict with the existing /stations/{station_id} route.
 def _validate_station_payload(payload:dict,existing_id:Optional[int]=None)->dict:
     station_number=str(payload.get("station_number") or "").strip()
     name=str(payload.get("name") or "").strip()
