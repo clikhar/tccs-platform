@@ -189,13 +189,13 @@ async def update_section(section_id: int, payload: dict = Body(...), db: AsyncSe
 async def delete_section(section_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
     used = await db.execute(text("SELECT COUNT(*) FROM stations WHERE section_id=:id"), {"id": section_id})
     if int(used.scalar_one()) > 0:
-        raise HTTPException(status_code=409, detail="Section is assigned to one or more stations; disable it instead")
-    result = await db.execute(text("UPDATE sections SET enabled=FALSE WHERE id=:id RETURNING id"), {"id": section_id})
+        raise HTTPException(status_code=409, detail="Section is assigned to one or more stations; reassign the stations before deleting it")
+    result = await db.execute(text("DELETE FROM sections WHERE id=:id RETURNING id,code,name"), {"id": section_id})
     row = result.first()
     if row is None:
         raise HTTPException(status_code=404, detail="Section not found")
     await db.commit()
-    return {"status": "DISABLED", "id": section_id}
+    return {"status": "DELETED", "id": row.id, "code": row.code, "name": row.name}
 
 
 @router.get("/station-types")
@@ -246,16 +246,19 @@ async def update_station_type(type_id: int, payload: dict = Body(...), db: Async
 
 @router.delete("/station-types/{type_id}")
 async def delete_station_type(type_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
-    result = await db.execute(text("SELECT code FROM station_types WHERE id=:id"), {"id": type_id})
+    result = await db.execute(text("SELECT id,code FROM station_types WHERE id=:id"), {"id": type_id})
     row = result.first()
     if row is None:
         raise HTTPException(status_code=404, detail="Station type not found")
     used = await db.execute(text("SELECT COUNT(*) FROM stations WHERE station_type=:code"), {"code": row.code})
     if int(used.scalar_one()) > 0:
-        raise HTTPException(status_code=409, detail="Station type is assigned to one or more stations; disable it instead")
-    await db.execute(text("UPDATE station_types SET enabled=FALSE WHERE id=:id"), {"id": type_id})
+        raise HTTPException(status_code=409, detail="Station type is assigned to one or more stations; reassign the stations before deleting it")
+    deleted = await db.execute(text("DELETE FROM station_types WHERE id=:id RETURNING id,code"), {"id": type_id})
+    deleted_row = deleted.first()
+    if deleted_row is None:
+        raise HTTPException(status_code=404, detail="Station type not found")
     await db.commit()
-    return {"status": "DISABLED", "id": type_id}
+    return {"status": "DELETED", "id": deleted_row.id, "code": deleted_row.code}
 
 
 @router.get("/stations")
@@ -344,9 +347,9 @@ async def delete_master_station(station_id: int, db: AsyncSession = Depends(get_
     channels = await active_channel_details()
     if any(c.get("extension") == station.sip_extension and c.get("channel") for c in channels):
         raise HTTPException(status_code=409, detail="Station has an active call; disconnect it before removing the subscriber")
-    await db.execute(text("UPDATE stations SET enabled=FALSE WHERE id=:id"), {"id": station_id})
+    await db.execute(text("DELETE FROM stations WHERE id=:id"), {"id": station_id})
     await db.commit()
-    return {"status": "REMOVED", "station_id": station.id, "station_number": station.station_number}
+    return {"status": "DELETED", "station_id": station.id, "station_number": station.station_number}
 
 
 @router.get("/summary")
