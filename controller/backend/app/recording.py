@@ -11,6 +11,10 @@ from sqlalchemy import text
 
 from .asterisk import active_channel_details
 from .db import SessionLocal
+from .master import router as master_router
+from .recording_management import router as recording_management_router
+
+master_router.include_router(recording_management_router)
 
 CONFERENCE = os.getenv("TCCS_RECORDING_CONFERENCE", "SECTION01")
 POLL_INTERVAL = float(os.getenv("TCCS_RECORDING_POLL_INTERVAL", "1.0"))
@@ -77,80 +81,53 @@ async def _sync_outbound_call_history(channels: List[Dict[str, str]]) -> None:
     now = datetime.now(timezone.utc)
     async with SessionLocal() as db:
         result = await db.execute(text("""
-            SELECT
-                h.id,
-                h.asterisk_channel,
-                h.originated_at,
-                h.answered_at,
-                s.sip_extension
+            SELECT h.id,h.asterisk_channel,h.originated_at,h.answered_at,s.sip_extension
             FROM call_history h
-            LEFT JOIN stations s ON s.id = h.target_station_id
-            WHERE h.source_extension = '9999'
-              AND h.ended_at IS NULL
+            LEFT JOIN stations s ON s.id=h.target_station_id
+            WHERE h.source_extension='9999' AND h.ended_at IS NULL
             ORDER BY h.originated_at
         """))
         rows = list(result)
-
         for row in rows:
             extension = (row.sip_extension or "").strip()
             channel = active_by_extension.get(extension)
-
             if channel:
                 channel_name = channel.get("channel", "").strip()
                 application = channel.get("application", "").strip().upper()
                 if not channel_name:
                     continue
-
                 if row.asterisk_channel and row.asterisk_channel != channel_name:
                     await db.execute(text("""
-                        UPDATE call_history
-                        SET status = 'ENDED',
-                            ended_at = :now,
-                            duration_seconds = GREATEST(
-                                0,
-                                EXTRACT(EPOCH FROM (:now - COALESCE(answered_at, originated_at)))::INTEGER
-                            )
-                        WHERE id = :id
-                    """), {"now": now, "id": row.id})
+                        UPDATE call_history SET status='ENDED',ended_at=:now,
+                        duration_seconds=GREATEST(0,EXTRACT(EPOCH FROM (:now-COALESCE(answered_at,originated_at)))::INTEGER)
+                        WHERE id=:id
+                    """), {"now":now,"id":row.id})
                     continue
-
                 if application == "CONFBRIDGE":
                     await db.execute(text("""
-                        UPDATE call_history
-                        SET asterisk_channel = :channel,
-                            status = 'ANSWERED',
-                            answered_at = COALESCE(answered_at, :now)
-                        WHERE id = :id AND ended_at IS NULL
-                    """), {"channel": channel_name, "now": now, "id": row.id})
+                        UPDATE call_history SET asterisk_channel=:channel,status='ANSWERED',answered_at=COALESCE(answered_at,:now)
+                        WHERE id=:id AND ended_at IS NULL
+                    """), {"channel":channel_name,"now":now,"id":row.id})
                 else:
                     await db.execute(text("""
-                        UPDATE call_history
-                        SET asterisk_channel = :channel,
-                            status = CASE WHEN status = 'ORIGINATED' THEN 'RINGING' ELSE status END
-                        WHERE id = :id AND ended_at IS NULL
-                    """), {"channel": channel_name, "id": row.id})
+                        UPDATE call_history SET asterisk_channel=:channel,status=CASE WHEN status='ORIGINATED' THEN 'RINGING' ELSE status END
+                        WHERE id=:id AND ended_at IS NULL
+                    """), {"channel":channel_name,"id":row.id})
                 continue
-
-            age = (now - row.originated_at).total_seconds()
-            if row.asterisk_channel or age >= HISTORY_ORIGINATE_TIMEOUT:
+            age=(now-row.originated_at).total_seconds()
+            if row.asterisk_channel or age>=HISTORY_ORIGINATE_TIMEOUT:
                 await db.execute(text("""
-                    UPDATE call_history
-                    SET status = 'ENDED',
-                        ended_at = :now,
-                        duration_seconds = GREATEST(
-                            0,
-                            EXTRACT(EPOCH FROM (:now - COALESCE(answered_at, originated_at)))::INTEGER
-                        )
-                    WHERE id = :id AND ended_at IS NULL
-                """), {"now": now, "id": row.id})
-
+                    UPDATE call_history SET status='ENDED',ended_at=:now,
+                    duration_seconds=GREATEST(0,EXTRACT(EPOCH FROM (:now-COALESCE(answered_at,originated_at)))::INTEGER)
+                    WHERE id=:id AND ended_at IS NULL
+                """), {"now":now,"id":row.id})
         await db.commit()
 
 
 async def _is_recording() -> bool:
     output = await _cli("core show channels concise")
     prefix = f"CBRec/{CONFERENCE}-".lower()
-    return any(line.strip().split("!", 1)[0].lower().startswith(prefix) for line in output.splitlines())
+    return any(line.strip().split("!",1)[0].lower().startswith(prefix) for line in output.splitlines())
 
 
 async def _start_recording() -> None:
@@ -175,7 +152,6 @@ async def recording_loop() -> None:
             await _sync_outbound_call_history(channels)
             stations = _station_channels(channels)
             recording = await _is_recording()
-
             if stations and not recording:
                 await _start_recording()
             elif not stations and recording:
