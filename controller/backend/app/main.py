@@ -23,7 +23,12 @@ from .schemas import SectionOut, StationOut
 app = FastAPI(title="TCCS Controller API", version="0.5.0")
 app.include_router(master_router)
 
-allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://192.168.1.21:5173"]
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://192.168.1.21:5173",
+    "http://100.93.101.10:5173",
+]
 frontend_origin = os.getenv("TCCS_FRONTEND_ORIGIN")
 if frontend_origin:
     allowed_origins.append(frontend_origin.rstrip("/"))
@@ -202,7 +207,7 @@ def _validate_station_payload(payload:dict,existing_id:Optional[int]=None)->dict
 @app.get("/api/v1/station-management")
 async def manage_list_stations(db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     result=await db.execute(select(Station).order_by(Station.priority,Station.station_number))
-    return [dict(s.__dict__) | {"_sa_instance_state":None} for s in result.scalars().all()]
+    return [{"id":s.id,"station_number":s.station_number,"name":s.name,"location":s.location,"section_id":s.section_id,"sip_extension":s.sip_extension,"station_type":s.station_type,"enabled":s.enabled,"priority":s.priority} for s in result.scalars().all()]
 
 @app.post("/api/v1/station-management")
 async def manage_create_station(payload:dict=Body(...),db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
@@ -234,9 +239,9 @@ async def manage_update_station(station_id:int,payload:dict=Body(...),db:AsyncSe
 async def manage_delete_station(station_id:int,db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     station=await db.get(Station,station_id)
     if station is None: raise HTTPException(status_code=404,detail="Station not found")
-    channels=await active_channel_details()
-    active=any(c.get("extension")==station.sip_extension and c.get("channel") for c in channels)
-    if active: raise HTTPException(status_code=409,detail="Station has an active call; disconnect it before removing the subscriber")
+    active=await active_channel_details()
+    if any(c.get("extension")==station.sip_extension for c in active):
+        raise HTTPException(status_code=409,detail="Cannot remove subscriber while it has an active call")
     station.enabled=False
     await db.commit()
-    return {"status":"REMOVED","station_id":station.id,"station_number":station.station_number}
+    return {"status":"REMOVED","station_id":station.id}
