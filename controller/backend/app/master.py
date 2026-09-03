@@ -15,6 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .asterisk import active_channel_details
 from .db import get_db
 
 router = APIRouter(prefix="/api/v1/master", tags=["master"])
@@ -255,6 +256,97 @@ async def delete_station_type(type_id: int, db: AsyncSession = Depends(get_db), 
     await db.execute(text("UPDATE station_types SET enabled=FALSE WHERE id=:id"), {"id": type_id})
     await db.commit()
     return {"status": "DISABLED", "id": type_id}
+
+
+@router.get("/stations")
+async def master_stations(db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("""
+        SELECT id,station_number,name,location,section_id,sip_extension,station_type,enabled,priority
+        FROM stations ORDER BY priority,station_number
+    """))
+    return [dict(row._mapping) for row in result]
+
+
+def _station_payload(payload: dict, current=None) -> dict:
+    station_number = str(payload.get("station_number", getattr(current, "station_number", "")) or "").strip()
+    name = str(payload.get("name", getattr(current, "name", "")) or "").strip()
+    location = str(payload.get("location", getattr(current, "location", "")) or "").strip() or None
+    sip = str(payload.get("sip_extension", getattr(current, "sip_extension", "")) or "").strip()
+    section_id = payload.get("section_id", getattr(current, "section_id", None))
+    station_type = str(payload.get("station_type", getattr(current, "station_type", "WAY_STATION")) or "WAY_STATION").strip().upper()
+    enabled = bool(payload.get("enabled", getattr(current, "enabled", True)))
+    if not station_number:
+        raise HTTPException(status_code=400, detail="Station number is required")
+    if not name:
+        raise HTTPException(status_code=400, detail="Station name is required")
+    if not re.fullmatch(r"10\d{2}", sip):
+        raise HTTPException(status_code=400, detail="SIP extension must be a 4-digit 10xx extension")
+    try:
+        section_id = int(section_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Valid section_id is required")
+    return {"station_number": station_number[:32], "name": name[:128], "location": location[:256] if location else None, "sip_extension": sip, "section_id": section_id, "station_type": station_type[:32], "enabled": enabled}
+
+
+@router.post("/stations")
+async def create_master_station(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    data = _station_payload(payload)
+    section = await db.execute(text("SELECT id FROM sections WHERE id=:id"), {"id": data["section_id"]})
+    if section.first() is None:
+        raise HTTPException(status_code=400, detail="Section not found")
+    station_type = await db.execute(text("SELECT code FROM station_types WHERE code=:code AND enabled=TRUE"), {"code": data["station_type"]})
+    if station_type.first() is None:
+        raise HTTPException(status_code=400, detail="Station type not found or disabled")
+    duplicate = await db.execute(text("SELECT id FROM stations WHERE station_number=:station_number OR sip_extension=:sip"), {"station_number": data["station_number"], "sip": data["sip_extension"]})
+    if duplicate.first() is not None:
+        raise HTTPException(status_code=409, detail="Station number or SIP extension already exists")
+    result = await db.execute(text("""
+        INSERT INTO stations(station_number,name,location,section_id,sip_extension,station_type,enabled,priority)
+        VALUES(:station_number,:name,:location,:section_id,:sip_extension,:station_type,:enabled,100)
+        RETURNING id,station_number,name,location,section_id,sip_extension,station_type,enabled,priority
+    """), data)
+    await db.commit()
+    return dict(result.first()._mapping)
+
+
+@router.put("/stations/{station_id}")
+async def update_master_station(station_id: int, payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("SELECT id,station_number,name,location,section_id,sip_extension,station_type,enabled,priority FROM stations WHERE id=:id"), {"id": station_id})
+    current = result.first()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+    data = _station_payload(payload, current)
+    section = await db.execute(text("SELECT id FROM sections WHERE id=:id"), {"id": data["section_id"]})
+    if section.first() is None:
+        raise HTTPException(status_code=400, detail="Section not found")
+    station_type = await db.execute(text("SELECT code FROM station_types WHERE code=:code AND enabled=TRUE"), {"code": data["station_type"]})
+    if station_type.first() is None:
+        raise HTTPException(status_code=400, detail="Station type not found or disabled")
+    duplicate = await db.execute(text("SELECT id FROM stations WHERE (station_number=:station_number OR sip_extension=:sip) AND id<>:id"), {"station_number": data["station_number"], "sip": data["sip_extension"], "id": station_id})
+    if duplicate.first() is not None:
+        raise HTTPException(status_code=409, detail="Station number or SIP extension already exists")
+    result = await db.execute(text("""
+        UPDATE stations SET station_number=:station_number,name=:name,location=:location,section_id=:section_id,
+            sip_extension=:sip_extension,station_type=:station_type,enabled=:enabled
+        WHERE id=:id
+        RETURNING id,station_number,name,location,section_id,sip_extension,station_type,enabled,priority
+    """), dict(data, id=station_id))
+    await db.commit()
+    return dict(result.first()._mapping)
+
+
+@router.delete("/stations/{station_id}")
+async def delete_master_station(station_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("SELECT id,station_number,sip_extension FROM stations WHERE id=:id"), {"id": station_id})
+    station = result.first()
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+    channels = await active_channel_details()
+    if any(c.get("extension") == station.sip_extension and c.get("channel") for c in channels):
+        raise HTTPException(status_code=409, detail="Station has an active call; disconnect it before removing the subscriber")
+    await db.execute(text("UPDATE stations SET enabled=FALSE WHERE id=:id"), {"id": station_id})
+    await db.commit()
+    return {"status": "REMOVED", "station_id": station.id, "station_number": station.station_number}
 
 
 @router.get("/summary")
