@@ -6,6 +6,9 @@ import re
 import uuid
 from typing import Dict, List, Optional
 
+from sqlalchemy import text
+from .db import SessionLocal
+
 AMI_HOST = os.getenv("AMI_HOST", "127.0.0.1")
 AMI_PORT = int(os.getenv("AMI_PORT", "5038"))
 AMI_USERNAME = os.getenv("AMI_USERNAME", "tccs-controller")
@@ -152,12 +155,7 @@ async def _find_station_channel_once(extension: str) -> Optional[str]:
 
 
 async def station_channel(extension: str) -> Optional[str]:
-    """Find a station's PJSIP channel, including an unanswered ringing call.
-
-    Originate is asynchronous, so the channel can appear a few hundred
-    milliseconds after the UI's CALLING state. Retry briefly so END works
-    even when the operator presses it immediately after CALLING appears.
-    """
+    """Find a station's PJSIP channel, including an unanswered ringing call."""
     for attempt in range(8):
         channel = await _find_station_channel_once(extension)
         if channel:
@@ -167,14 +165,34 @@ async def station_channel(extension: str) -> Optional[str]:
     return None
 
 
+async def _resolve_station_conference(extension: str, conference: str) -> str:
+    """Translate the legacy SECTION01 name to the station's controller bridge."""
+    if conference.strip().upper() != "SECTION01":
+        return conference
+    async with SessionLocal() as db:
+        result = await db.execute(text("""
+            SELECT sa.extension
+            FROM stations st
+            JOIN controllers c ON c.section_id=st.section_id AND c.enabled=TRUE
+            JOIN sip_accounts sa ON sa.id=c.sip_account_id AND sa.enabled=TRUE
+            WHERE st.sip_extension=:extension
+            ORDER BY c.id
+            LIMIT 1
+        """), {"extension": str(extension).strip()})
+        row = result.first()
+    return f"TCCS-CTRL-{row.extension}" if row else conference
+
+
 async def conference_channel(extension: str, conference: str = "SECTION01") -> Optional[str]:
-    """Find the live PJSIP station channel currently running ConfBridge."""
-    channels = await conference_channels(extension, conference)
+    resolved = await _resolve_station_conference(extension, conference)
+    channels = await conference_channels(extension, resolved, _already_resolved=True)
     return channels[0] if channels else None
 
 
-async def conference_channels(extension: str, conference: str = "SECTION01") -> List[str]:
+async def conference_channels(extension: str, conference: str = "SECTION01", _already_resolved: bool = False) -> List[str]:
     """Return every live PJSIP channel for an extension in a ConfBridge."""
+    if not _already_resolved:
+        conference = await _resolve_station_conference(extension, conference)
     process = await asyncio.create_subprocess_exec(
         ASTERISK_CLI, "-rx", "core show channels concise",
         stdout=asyncio.subprocess.PIPE,
@@ -229,13 +247,7 @@ async def hangup_all_conference_channels(extension: str, conference: str = "SECT
 
 
 async def enforce_single_conference_channel(extension: str, conference: str = "SECTION01") -> int:
-    """Keep only the newest PJSIP conference channel for an extension.
-
-    This protects the controller from stale browser/SIP sessions. A browser
-    refresh can create a new 9999 channel before an old WebRTC session has
-    fully terminated, so the newest channel is retained and older duplicates
-    are hung up automatically.
-    """
+    """Keep only the newest PJSIP conference channel for an extension."""
     channels = await conference_channels(extension, conference)
     if len(channels) <= 1:
         return 0
@@ -255,8 +267,9 @@ async def enforce_single_conference_channel(extension: str, conference: str = "S
 
 
 async def mute_conference_channel(extension: str, conference: str = "SECTION01", mute: bool = True) -> Dict[str, str]:
-    channel = await conference_channel(extension, conference)
+    resolved = await _resolve_station_conference(extension, conference)
+    channel = await conference_channel(extension, resolved)
     if not channel:
-        raise RuntimeError(f"Station {extension} is not in conference {conference}")
+        raise RuntimeError(f"Station {extension} is not in conference {resolved}")
     action = "ConfbridgeMute" if mute else "ConfbridgeUnmute"
-    return await _run_action("\r\n".join([f"Action: {action}", f"Conference: {conference}", f"Channel: {channel}"]))
+    return await _run_action("\r\n".join([f"Action: {action}", f"Conference: {resolved}", f"Channel: {channel}"]))
