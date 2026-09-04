@@ -16,9 +16,7 @@ from .user_management import router as user_router
 
 router = APIRouter(prefix="/api/v1/emergency", tags=["emergency"])
 
-# user_management contains the shared authentication, role and controller SIP
-# management endpoints. Include them in the already-mounted master router so
-# the existing /api/v1/master/* API remains backward compatible.
+# Mount shared authentication/role/controller-SIP routes on the existing master router.
 master_router.include_router(user_router)
 
 EMERGENCY_PRIORITY = 1000
@@ -101,7 +99,7 @@ async def create_emergency_group(payload: dict = Body(...), db: AsyncSession = D
     return {"id": row.id, "code": code, "name": name, "section_id": section_id, "enabled": True, "priority": priority}
 
 @router.put("/groups/{group_id}/members")
-async def set_emergency_group_members(group_id: int, payload: dict, db: AsyncSession = Depends(get_db)):
+async def set_emergency_group_members(group_id: int, payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
     station_ids = payload.get("station_ids")
     if not isinstance(station_ids, list):
         raise HTTPException(status_code=400, detail="station_ids must be a list")
@@ -127,7 +125,6 @@ async def emergency_group_call(group_id: int, db: AsyncSession = Depends(get_db)
     group = group_result.first()
     if group is None:
         raise HTTPException(status_code=404, detail="Emergency group not found or disabled")
-
     members_result = await db.execute(text("""
         SELECT s.id,s.station_number,s.name,s.sip_extension
         FROM emergency_group_members gm
@@ -138,10 +135,8 @@ async def emergency_group_call(group_id: int, db: AsyncSession = Depends(get_db)
     members = list(members_result)
     if not members:
         raise HTTPException(status_code=409, detail="Emergency group has no enabled members")
-
     active_result = await db.execute(text("SELECT extension FROM (SELECT split_part(channel,'-',1) AS extension FROM (SELECT '' AS channel) x) y WHERE FALSE"))
     await active_result.close()
-
     event_result = await db.execute(text("""
         INSERT INTO emergency_events(group_id,group_code,source_extension,priority,status,target_count)
         VALUES (:group_id,:group_code,'9999',:priority,'ORIGINATED',:target_count)
@@ -149,32 +144,19 @@ async def emergency_group_call(group_id: int, db: AsyncSession = Depends(get_db)
     """), {"group_id": group.id, "group_code": group.code, "priority": EMERGENCY_PRIORITY, "target_count": len(members)})
     event = event_result.first()
     await db.commit()
-
     async def originate(member):
         try:
             response = await call_station(member.sip_extension)
             return {"station_id": member.id, "station_number": member.station_number, "sip_extension": member.sip_extension, "status": "ORIGINATED", "response": response}
         except Exception as exc:
             return {"station_id": member.id, "station_number": member.station_number, "sip_extension": member.sip_extension, "status": "FAILED", "error": str(exc)}
-
     results = await asyncio.gather(*(originate(member) for member in members))
     originated = sum(1 for item in results if item["status"] == "ORIGINATED")
     failed = len(results) - originated
     status = "ORIGINATED" if originated else "FAILED"
     await db.execute(text("UPDATE emergency_events SET status=:status WHERE id=:id"), {"status": status, "id": event.id})
     await db.commit()
-
-    return {
-        "status": "EMERGENCY_ORIGINATED" if originated else "EMERGENCY_FAILED",
-        "priority": EMERGENCY_PRIORITY,
-        "event_id": event.id,
-        "group_id": group.id,
-        "group_code": group.code,
-        "target_count": len(members),
-        "originated_count": originated,
-        "failed_count": failed,
-        "results": results,
-    }
+    return {"status": "EMERGENCY_ORIGINATED" if originated else "EMERGENCY_FAILED","priority": EMERGENCY_PRIORITY,"event_id": event.id,"group_id": group.id,"group_code": group.code,"target_count": len(members),"originated_count": originated,"failed_count": failed,"results": results}
 
 @router.get("/events")
 async def emergency_events(limit: int = 50, db: AsyncSession = Depends(get_db)):
