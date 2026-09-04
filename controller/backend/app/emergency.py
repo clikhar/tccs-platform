@@ -11,8 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .calls import call_station
 from .db import get_db
 from .models import Station
+from .master import router as master_router
+from .user_management import router as user_router
 
 router = APIRouter(prefix="/api/v1/emergency", tags=["emergency"])
+
+# user_management contains the shared authentication, role and controller SIP
+# management endpoints. Include them in the already-mounted master router so
+# the existing /api/v1/master/* API remains backward compatible.
+master_router.include_router(user_router)
 
 EMERGENCY_PRIORITY = 1000
 
@@ -94,7 +101,7 @@ async def create_emergency_group(payload: dict = Body(...), db: AsyncSession = D
     return {"id": row.id, "code": code, "name": name, "section_id": section_id, "enabled": True, "priority": priority}
 
 @router.put("/groups/{group_id}/members")
-async def set_emergency_group_members(group_id: int, payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+async def set_emergency_group_members(group_id: int, payload: dict, db: AsyncSession = Depends(get_db)):
     station_ids = payload.get("station_ids")
     if not isinstance(station_ids, list):
         raise HTTPException(status_code=400, detail="station_ids must be a list")
