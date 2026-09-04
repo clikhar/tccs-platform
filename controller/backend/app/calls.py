@@ -9,7 +9,9 @@ DEFAULT_TCCS_CONFERENCE = "SECTION01"
 
 def controller_conference(controller_extension: str | None) -> str:
     extension = str(controller_extension or "").strip()
-    return f"TCCS-CTRL-{extension}" if extension else DEFAULT_TCCS_CONFERENCE
+    if not extension:
+        raise ValueError("No enabled controller SIP account is assigned to this station's section")
+    return f"TCCS-CTRL-{extension}"
 
 
 async def conference_for_station(extension: str) -> str:
@@ -17,7 +19,8 @@ async def conference_for_station(extension: str) -> str:
 
     A station belongs to one section. The section is associated with the
     controller, and that controller's SIP extension is the bridge namespace.
-    This keeps station-originated calls out of other controllers' conferences.
+    A missing controller is an error rather than a fallback to a shared bridge;
+    this prevents audio from one section/controller entering another bridge.
     """
     async with SessionLocal() as db:
         result = await db.execute(text("""
