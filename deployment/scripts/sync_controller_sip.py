@@ -9,6 +9,11 @@ The generated endpoints deliberately use the existing Asterisk transport-wss
 configuration used by the browser WebRTC controllers. Station SIP remains on
 the existing transport-tccs UDP/5060 configuration and is not generated here.
 
+The legacy static WebRTC controller accounts 9998 and 9999 are intentionally
+not generated so an existing installation can keep them while migrating to
+DB-managed controller accounts. They can be migrated to the database later,
+after their static PJSIP definitions have been removed.
+
 Environment:
   DATABASE_URL      SQLAlchemy-style PostgreSQL URL used by the backend.
   TCCS_PJSIP_OUTPUT Output path, default /etc/asterisk/pjsip.d/tccs-controllers.conf
@@ -30,6 +35,7 @@ from urllib.parse import unquote, urlparse
 
 DEFAULT_DATABASE_URL = "postgresql://tccs:change-me-local@localhost:5432/tccs"
 DEFAULT_OUTPUT = "/etc/asterisk/pjsip.d/tccs-controllers.conf"
+LEGACY_STATIC_EXTENSIONS = {"9998", "9999"}
 
 
 def database_parts(url: str) -> tuple[str, str, str, str, str]:
@@ -90,13 +96,14 @@ def query_accounts() -> list[dict]:
 
 
 def render(accounts: list[dict]) -> str:
-    seen_extensions: set[str] = set()
+    seen_extensions: set[str] = set(LEGACY_STATIC_EXTENSIONS)
     seen_usernames: set[str] = set()
     lines = [
         "; GENERATED FILE - do not edit manually.",
         "; Source: TCCS controllers + sip_accounts tables.",
-        "; Each controller gets an isolated conference named TCCS-CTRL-<extension>.",
-        "; Browser controllers use the existing transport-wss configuration.",
+        "; Each generated controller gets an isolated conference named TCCS-CTRL-<extension>.",
+        "; Browser controllers use the existing Asterisk transport-wss configuration.",
+        "; Legacy static controller extensions 9998 and 9999 are deliberately omitted.",
         ";",
         "[controller-template](!)",
         "type=endpoint",
@@ -133,6 +140,8 @@ def render(accounts: list[dict]) -> str:
     for account in accounts:
         extension = str(account["extension"]).strip()
         username = str(account["username"]).strip()
+        if extension in LEGACY_STATIC_EXTENSIONS:
+            continue
         if not re.fullmatch(r"9\d{3}", extension):
             raise SystemExit(
                 f"Controller {account['controller_code']} uses SIP extension {extension!r}; "
@@ -180,9 +189,12 @@ def main() -> None:
     content = render(accounts)
     output = Path(os.getenv("TCCS_PJSIP_OUTPUT", DEFAULT_OUTPUT))
     write_atomic(output, content)
-    print(f"Provisioned {len(accounts)} controller SIP endpoint(s) -> {output}")
-    for account in accounts:
+    provisioned = [a for a in accounts if str(a["extension"]).strip() not in LEGACY_STATIC_EXTENSIONS]
+    print(f"Provisioned {len(provisioned)} controller SIP endpoint(s) -> {output}")
+    for account in provisioned:
         print(f"  {account['controller_code']}: SIP {account['extension']} -> TCCS-CTRL-{account['extension']}")
+    if any(str(a["extension"]).strip() in LEGACY_STATIC_EXTENSIONS for a in accounts):
+        print("  Legacy static controllers 9998/9999 retained outside generated configuration")
 
 
 if __name__ == "__main__":
