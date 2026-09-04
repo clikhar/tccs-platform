@@ -2,8 +2,12 @@
 """Generate Asterisk PJSIP controller endpoints from the TCCS database.
 
 Only enabled SIP accounts assigned to enabled controllers are provisioned.
-Controller extensions are intentionally restricted to 9xxx because the
-TCCS station dialplan uses _9XXX for station -> controller calls.
+Controller extensions are restricted to 9xxx because the TCCS station dialplan
+uses _9XXX for station -> controller calls.
+
+The generated endpoints deliberately use the existing Asterisk transport-wss
+configuration used by the browser WebRTC controllers. Station SIP remains on
+the existing transport-tccs UDP/5060 configuration and is not generated here.
 
 Environment:
   DATABASE_URL      SQLAlchemy-style PostgreSQL URL used by the backend.
@@ -92,23 +96,27 @@ def render(accounts: list[dict]) -> str:
         "; GENERATED FILE - do not edit manually.",
         "; Source: TCCS controllers + sip_accounts tables.",
         "; Each controller gets an isolated conference named TCCS-CTRL-<extension>.",
+        "; Browser controllers use the existing transport-wss configuration.",
         ";",
         "[controller-template](!)",
         "type=endpoint",
-        "transport=transport-udp",
+        "transport=transport-wss",
         "context=tccs-controller",
         "disallow=all",
-        "allow=opus,alaw,ulaw",
+        "allow=ulaw,alaw",
         "webrtc=yes",
+        "use_avpf=yes",
         "media_encryption=dtls",
         "dtls_auto_generate_cert=yes",
+        "dtls_verify=fingerprint",
+        "dtls_setup=actpass",
         "ice_support=yes",
+        "media_use_received_transport=yes",
         "rtcp_mux=yes",
-        "use_avpf=yes",
-        "direct_media=no",
-        "rtp_symmetric=yes",
-        "force_rport=yes",
         "rewrite_contact=yes",
+        "force_rport=yes",
+        "rtp_symmetric=yes",
+        "direct_media=no",
         "",
         "[controller-auth-template](!)",
         "type=auth",
