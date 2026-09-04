@@ -21,6 +21,11 @@ from .user_management import ROLE_ADMIN, ROLE_TESTROOM, require_user
 
 MONITOR_DIR = Path(os.getenv("TCCS_RECORDING_DIR", "/var/spool/asterisk/monitor")).resolve()
 router = APIRouter(prefix="/recordings", tags=["recordings"])
+
+# server_management.py is also used as a standalone router, but here it is
+# mounted inside the /api/v1/master router. Strip its absolute prefix before
+# including it so the public API remains /api/v1/master/servers.
+server_management_router.prefix = "/servers"
 master_router.include_router(server_management_router)
 
 
