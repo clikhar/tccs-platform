@@ -20,9 +20,11 @@ from .models import Section, Station
 from .recording import recording_loop
 from .schemas import SectionOut, StationOut
 from .emergency import ensure_emergency_tables, router as emergency_router
+from .server_management import router as server_management_router
 
 app = FastAPI(title="TCCS Controller API", version="0.5.0")
 app.include_router(master_router)
+app.include_router(server_management_router)
 app.include_router(emergency_router)
 
 allowed_origins = [
@@ -87,163 +89,122 @@ async def stop_recording_worker() -> None:
     except asyncio.CancelledError:
         pass
 
+
+def _station_out(station: Station, registered: bool = False) -> dict:
+    return {
+        "id": station.id,
+        "station_number": station.station_number,
+        "name": station.name,
+        "location": station.location,
+        "section_id": station.section_id,
+        "sip_extension": station.sip_extension,
+        "station_type": station.station_type,
+        "enabled": station.enabled,
+        "priority": station.priority,
+        "registered": registered,
+    }
+
+@app.get("/api/v1/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+@app.get("/api/v1/sections", response_model=List[SectionOut])
+async def sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
+    result = await db.execute(select(Section).where(Section.enabled.is_(True)).order_by(Section.id))
+    return list(result.scalars().all())
+
 @app.get("/api/v1/stations", response_model=List[StationOut])
-async def list_stations(db: AsyncSession = Depends(get_db)) -> List[Station]:
+async def stations(db: AsyncSession = Depends(get_db)) -> List[Station]:
     result = await db.execute(select(Station).where(Station.enabled.is_(True)).order_by(Station.priority, Station.station_number))
     return list(result.scalars().all())
 
-@app.put("/api/v1/stations/order")
-async def reorder_stations(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
-    station_ids = payload.get("station_ids")
-    if not isinstance(station_ids, list) or not station_ids:
-        raise HTTPException(status_code=400, detail="station_ids must be a non-empty list")
-    for index, station_id in enumerate(station_ids, start=1):
-        station = await db.get(Station, int(station_id))
-        if station is not None and station.enabled:
-            station.priority = index * 10
-    await db.commit()
-    return {"status": "OK", "station_ids": station_ids}
-
-@app.get("/api/v1/sections", response_model=List[SectionOut])
-async def list_sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
-    result = await db.execute(select(Section).order_by(Section.id))
-    return list(result.scalars().all())
-
-@app.get("/api/v1/groups")
-async def list_groups(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(text("""
-        SELECT g.id,g.code,g.name,g.section_id,
-        COALESCE(json_agg(json_build_object('id',s.id,'station_number',s.station_number,'name',s.name,'sip_extension',s.sip_extension) ORDER BY s.priority,s.station_number) FILTER (WHERE s.id IS NOT NULL),'[]'::json) AS members
-        FROM station_groups g
-        LEFT JOIN station_group_members gm ON gm.group_id=g.id
-        LEFT JOIN stations s ON s.id=gm.station_id AND s.enabled=TRUE
-        WHERE g.enabled=TRUE GROUP BY g.id,g.code,g.name,g.section_id ORDER BY g.id
-    """))
-    return [dict(row._mapping) for row in result]
-
-async def _sync_incoming_controller_calls(db: AsyncSession) -> None:
-    channels = await active_channel_details()
-    incoming = [c for c in channels if c.get("context")=="tccs-stations" and c.get("dialed_extension")=="9999" and c.get("application")=="CONFBRIDGE" and re.fullmatch(r"10\d{2}",c.get("extension","").strip())]
-    active_channels={c["channel"] for c in incoming if c.get("channel")}
-    now=datetime.now(timezone.utc)
-    result=await db.execute(text("SELECT id,asterisk_channel,originated_at,answered_at FROM call_history WHERE call_type='INCOMING' AND ended_at IS NULL"))
-    for row in result:
-        if not row.asterisk_channel or row.asterisk_channel not in active_channels:
-            await db.execute(text("UPDATE call_history SET status='ENDED',ended_at=:now,duration_seconds=GREATEST(0,EXTRACT(EPOCH FROM (:now-COALESCE(answered_at,originated_at)))::INTEGER) WHERE id=:id"),{"now":now,"id":row.id})
-    for channel in incoming:
-        source_extension=channel["extension"].strip(); channel_name=channel["channel"].strip()
-        station_result=await db.execute(select(Station).where(Station.sip_extension==source_extension,Station.enabled.is_(True)))
-        station=station_result.scalar_one_or_none()
-        if station is None: continue
-        existing=await db.execute(text("SELECT id FROM call_history WHERE call_type='INCOMING' AND asterisk_channel=:asterisk_channel AND ended_at IS NULL LIMIT 1"),{"asterisk_channel":channel_name})
-        if existing.first() is not None: continue
-        await db.execute(text("INSERT INTO call_history (call_type,source_extension,target_station_id,target_station_number,target_name,status,originated_at,answered_at,asterisk_channel) VALUES ('INCOMING',:source_extension,:station_id,:station_number,:target_name,'ANSWERED',:now,:now,:asterisk_channel)"),{"source_extension":source_extension,"station_id":station.id,"station_number":station.station_number,"target_name":station.name,"now":now,"asterisk_channel":channel_name})
-    await db.commit()
-
 @app.get("/api/v1/asterisk/endpoints")
-async def asterisk_endpoints(): return await endpoint_status()
+async def asterisk_endpoints() -> dict:
+    return await endpoint_status()
 
-@app.get("/api/v1/call-history")
-async def call_history(limit:int=100,db:AsyncSession=Depends(get_db)):
-    limit=max(1,min(limit,500)); await _sync_incoming_controller_calls(db)
-    result=await db.execute(text("SELECT id,call_type,source_extension,target_station_number,target_name,group_code,status,originated_at,answered_at,ended_at,duration_seconds FROM call_history ORDER BY originated_at DESC LIMIT :limit"),{"limit":limit})
-    return [dict(row._mapping) for row in result]
+@app.get("/api/v1/asterisk/channels")
+async def asterisk_channels() -> dict:
+    channels = await active_channel_details()
+    return {"channels": channels}
 
-@app.post("/api/v1/calls/stations/{station_id}")
-async def call_station_endpoint(station_id:int,payload:Optional[dict]=Body(default=None),db:AsyncSession=Depends(get_db)):
-    station=await db.get(Station,station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404,detail="Station not found")
-    payload=payload or {}; call_type=str(payload.get("call_type") or "DIRECT").upper()
-    if call_type not in {"DIRECT","GENERAL","SECTION","GROUP"}: raise HTTPException(status_code=400,detail="Invalid call_type")
-    group_code=payload.get("group_code"); group_code=str(group_code)[:32] if group_code is not None else None
-    try: response=await call_station(station.sip_extension)
-    except Exception as exc: raise HTTPException(status_code=409,detail=str(exc))
-    history_result=await db.execute(text("INSERT INTO call_history (call_type,source_extension,target_station_id,target_station_number,target_name,group_code,status) VALUES (:call_type,'9999',:station_id,:station_number,:target_name,:group_code,'ORIGINATED') RETURNING id"),{"call_type":call_type,"station_id":station.id,"station_number":station.station_number,"target_name":station.name,"group_code":group_code})
-    history=history_result.first(); await db.commit()
-    return {"status":"ORIGINATED","station_id":station.id,"sip_extension":station.sip_extension,"history_id":history.id if history else None,"ami_response":response}
-
-@app.post("/api/v1/conference/stations/{station_id}/mute")
-async def mute_station(station_id:int,db:AsyncSession=Depends(get_db)):
-    station=await db.get(Station,station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404,detail="Station not found")
-    try: response=await mute_conference_channel(station.sip_extension,"SECTION01",True)
-    except Exception as exc: raise HTTPException(status_code=409,detail=str(exc))
-    return {"status":"MUTED","station_id":station.id,"sip_extension":station.sip_extension,"ami_response":response}
-
-@app.post("/api/v1/conference/stations/{station_id}/unmute")
-async def unmute_station(station_id:int,db:AsyncSession=Depends(get_db)):
-    station=await db.get(Station,station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404,detail="Station not found")
-    try: response=await mute_conference_channel(station.sip_extension,"SECTION01",False)
-    except Exception as exc: raise HTTPException(status_code=409,detail=str(exc))
-    return {"status":"UNMUTED","station_id":station.id,"sip_extension":station.sip_extension,"ami_response":response}
-
-@app.post("/api/v1/conference/stations/{station_id}/hangup")
-async def hangup_station(station_id:int,db:AsyncSession=Depends(get_db)):
-    station=await db.get(Station,station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404,detail="Station not found")
-    try: response=await hangup_station_channel(station.sip_extension)
-    except Exception as exc: raise HTTPException(status_code=409,detail=str(exc))
-    ended_at=datetime.now(timezone.utc)
-    await db.execute(text("UPDATE call_history SET status='ENDED',ended_at=:ended_at,duration_seconds=GREATEST(0,EXTRACT(EPOCH FROM (:ended_at-COALESCE(answered_at,originated_at)))::INTEGER) WHERE id=(SELECT id FROM call_history WHERE target_station_id=:station_id AND ended_at IS NULL ORDER BY originated_at DESC LIMIT 1)"),{"station_id":station.id,"ended_at":ended_at})
-    await db.commit()
-    return {"status":"HUNG_UP","station_id":station.id,"sip_extension":station.sip_extension,"ami_response":response}
-
-@app.get("/api/v1/stations/{station_id}",response_model=StationOut)
-async def get_station(station_id:int,db:AsyncSession=Depends(get_db))->Station:
-    station=await db.get(Station,station_id)
-    if station is None or not station.enabled: raise HTTPException(status_code=404,detail="Station not found")
-    return station
-
-def _validate_station_payload(payload:dict,existing_id:Optional[int]=None)->dict:
-    station_number=str(payload.get("station_number") or "").strip()
-    name=str(payload.get("name") or "").strip()
-    sip=str(payload.get("sip_extension") or "").strip()
-    if not station_number: raise HTTPException(status_code=400,detail="Station number is required")
-    if not name: raise HTTPException(status_code=400,detail="Station name is required")
-    if not re.fullmatch(r"10\d{2}",sip): raise HTTPException(status_code=400,detail="SIP extension must be a 4-digit 10xx extension")
-    try: section_id=int(payload.get("section_id"))
-    except (TypeError,ValueError): raise HTTPException(status_code=400,detail="Valid section_id is required")
-    return {"station_number":station_number[:32],"name":name[:128],"location":(str(payload.get("location") or "").strip() or None)[:256],"section_id":section_id,"sip_extension":sip[:64],"station_type":str(payload.get("station_type") or "WAY_STATION")[:32],"enabled":bool(payload.get("enabled",True)),"existing_id":existing_id}
+@app.post("/api/v1/calls/direct")
+async def direct_call(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)) -> dict:
+    station_id = payload.get("station_id")
+    try:
+        station_id = int(station_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Valid station_id is required")
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    result = await call_station(station.sip_extension)
+    return result
 
 @app.get("/api/v1/station-management")
-async def manage_list_stations(db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
-    result=await db.execute(select(Station).order_by(Station.priority,Station.station_number))
-    return [{"id":s.id,"station_number":s.station_number,"name":s.name,"location":s.location,"section_id":s.section_id,"sip_extension":s.sip_extension,"station_type":s.station_type,"enabled":s.enabled,"priority":s.priority} for s in result.scalars().all()]
+async def station_management_list(db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    result = await db.execute(text("SELECT s.id,s.station_number,s.name,s.location,s.section_id,s.sip_extension,s.station_type,s.enabled,s.priority,sec.code AS section_code,sec.name AS section_name FROM stations s LEFT JOIN sections sec ON sec.id=s.section_id ORDER BY s.priority,s.station_number"))
+    registered = {c.get("extension") for c in await active_channel_details()}
+    return [{**dict(row._mapping), "registered": row.sip_extension in registered} for row in result]
+
+def _validate_station_payload(payload: dict, existing_id: Optional[int] = None) -> dict:
+    station_number = str(payload.get("station_number") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    sip = str(payload.get("sip_extension") or "").strip()
+    if not station_number:
+        raise HTTPException(status_code=400, detail="Station number is required")
+    if not name:
+        raise HTTPException(status_code=400, detail="Station name is required")
+    if not re.fullmatch(r"10\d{2}", sip):
+        raise HTTPException(status_code=400, detail="SIP extension must be a 4-digit 10xx extension")
+    try:
+        section_id = int(payload.get("section_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Valid section_id is required")
+    return {"station_number": station_number, "name": name, "location": str(payload.get("location") or "").strip(), "section_id": section_id, "sip_extension": sip, "station_type": str(payload.get("station_type") or "OTHER").strip().upper(), "enabled": bool(payload.get("enabled", True)), "priority": int(payload.get("priority") or 100)}
 
 @app.post("/api/v1/station-management")
-async def manage_create_station(payload:dict=Body(...),db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
-    data=_validate_station_payload(payload)
-    section=await db.get(Section,data["section_id"])
-    if section is None: raise HTTPException(status_code=400,detail="Section not found")
-    duplicate=await db.execute(select(Station).where((Station.station_number==data["station_number"]) | (Station.sip_extension==data["sip_extension"])))
-    existing=duplicate.scalars().first()
-    if existing: raise HTTPException(status_code=409,detail="Station number or SIP extension already exists")
-    station=Station(station_number=data["station_number"],name=data["name"],location=data["location"],section_id=data["section_id"],sip_extension=data["sip_extension"],station_type=data["station_type"],enabled=data["enabled"],priority=100)
-    db.add(station); await db.commit(); await db.refresh(station)
-    return station
+async def manage_create_station(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    values = _validate_station_payload(payload)
+    if (await db.execute(text("SELECT id FROM sections WHERE id=:id"), {"id": values["section_id"]})).first() is None:
+        raise HTTPException(status_code=400, detail="Section not found")
+    if (await db.execute(text("SELECT id FROM stations WHERE station_number=:number"), {"number": values["station_number"]})).first() is not None:
+        raise HTTPException(status_code=409, detail="Station number already exists")
+    if (await db.execute(text("SELECT id FROM stations WHERE sip_extension=:sip"), {"sip": values["sip_extension"]})).first() is not None:
+        raise HTTPException(status_code=409, detail="SIP extension already exists")
+    result = await db.execute(text("INSERT INTO stations(station_number,name,location,section_id,sip_extension,station_type,enabled,priority) VALUES(:station_number,:name,:location,:section_id,:sip_extension,:station_type,:enabled,:priority) RETURNING id,station_number,name,location,section_id,sip_extension,station_type,enabled,priority"), values)
+    await db.commit()
+    return dict(result.first()._mapping)
 
 @app.put("/api/v1/station-management/{station_id}")
-async def manage_update_station(station_id:int,payload:dict=Body(...),db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
-    station=await db.get(Station,station_id)
-    if station is None: raise HTTPException(status_code=404,detail="Station not found")
-    merged={"station_number":payload.get("station_number",station.station_number),"name":payload.get("name",station.name),"location":payload.get("location",station.location),"section_id":payload.get("section_id",station.section_id),"sip_extension":payload.get("sip_extension",station.sip_extension),"station_type":payload.get("station_type",station.station_type),"enabled":payload.get("enabled",station.enabled)}
-    data=_validate_station_payload(merged,station_id)
-    section=await db.get(Section,data["section_id"])
-    if section is None: raise HTTPException(status_code=400,detail="Section not found")
-    duplicate=await db.execute(select(Station).where(((Station.station_number==data["station_number"]) | (Station.sip_extension==data["sip_extension"])) & (Station.id!=station_id)))
-    if duplicate.scalars().first(): raise HTTPException(status_code=409,detail="Station number or SIP extension already exists")
-    for key in ("station_number","name","location","section_id","sip_extension","station_type","enabled"): setattr(station,key,data[key])
-    await db.commit(); await db.refresh(station)
-    return station
+async def manage_update_station(station_id: int, payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    current = (await db.execute(text("SELECT * FROM stations WHERE id=:id"), {"id": station_id})).first()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+    values = _validate_station_payload(payload, station_id)
+    if (await db.execute(text("SELECT id FROM sections WHERE id=:id"), {"id": values["section_id"]})).first() is None:
+        raise HTTPException(status_code=400, detail="Section not found")
+    duplicate = (await db.execute(text("SELECT id FROM stations WHERE (station_number=:number OR sip_extension=:sip) AND id<>:id"), {"number": values["station_number"], "sip": values["sip_extension"], "id": station_id})).first()
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="Station number or SIP extension already exists")
+    active = await active_channel_details()
+    if values["sip_extension"] != current.sip_extension and any(c.get("extension") == current.sip_extension for c in active):
+        raise HTTPException(status_code=409, detail="Cannot change SIP extension while the subscriber has an active call")
+    result = await db.execute(text("UPDATE stations SET station_number=:station_number,name=:name,location=:location,section_id=:section_id,sip_extension=:sip_extension,station_type=:station_type,enabled=:enabled,priority=:priority WHERE id=:id RETURNING id,station_number,name,location,section_id,sip_extension,station_type,enabled,priority"), {**values, "id": station_id})
+    await db.commit()
+    return dict(result.first()._mapping)
 
 @app.delete("/api/v1/station-management/{station_id}")
-async def manage_delete_station(station_id:int,db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
-    station=await db.get(Station,station_id)
-    if station is None: raise HTTPException(status_code=404,detail="Station not found")
-    active=await active_channel_details()
-    if any(c.get("extension")==station.sip_extension for c in active):
-        raise HTTPException(status_code=409,detail="Cannot remove subscriber while it has an active call")
-    station.enabled=False
+async def manage_delete_station(station_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    station = await db.get(Station, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+    active = await active_channel_details()
+    if any(c.get("extension") == station.sip_extension for c in active):
+        raise HTTPException(status_code=409, detail="Cannot remove subscriber while it has an active call")
+    station.enabled = False
     await db.commit()
-    return {"status":"REMOVED","station_id":station.id}
+    return {"status": "REMOVED", "station_id": station.id}
+
+@app.get("/api/v1/asterisk/active-calls")
+async def active_calls() -> dict:
+    return {"channels": await active_channel_details()}
