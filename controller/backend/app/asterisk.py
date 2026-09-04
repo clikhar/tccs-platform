@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 from typing import Any, Dict, List
 
 ASTERISK_CLI = os.getenv("ASTERISK_CLI", "/usr/sbin/asterisk")
@@ -86,25 +87,20 @@ async def _enforce_single_controller_channel(channels_output: str, extension: st
     if len(channels) <= 1:
         return channels[0] if channels else ""
 
-    # The largest channel sequence is the newest browser session. Keep it and
-    # explicitly hang up every older session. This is independent of the SIP
-    # registration state, because a browser refresh can leave the old dialog
-    # alive briefly while the new browser session is already registered.
+    # Keep the newest browser session and explicitly terminate older sessions.
     channels.sort(key=_channel_sequence)
     keep = channels[-1]
     for channel in channels[:-1]:
-        result = await _run_cli("channel request hangup", channel)
-        if "Requested Hangup" not in result and "requested hangup" not in result.lower():
-            # Do not fail the endpoint request; Asterisk may have removed the
-            # channel between our concise listing and the hangup command.
+        # asterisk -rx accepts the complete CLI command as one argument.
+        try:
+            await _run_cli(f"channel request hangup {channel}")
+        except (OSError, asyncio.TimeoutError, subprocess.TimeoutExpired):
+            # The channel can disappear between the concise listing and hangup.
             continue
     return keep
 
 
 async def _cleanup_controller_channels(channels_output: str) -> None:
-    # Do not derive controllers from the aggregate active-channel state. Scan
-    # the actual PJSIP/9xxx ConfBridge legs so cleanup still runs when several
-    # sessions exist for the same extension.
     controller_extensions = sorted({
         channel["extension"]
         for channel in _parse_active_channel_details(channels_output)
@@ -123,7 +119,6 @@ async def _cleanup_controller_channels(channels_output: str) -> None:
 
 
 def _run_cli_sync(*args: str) -> str:
-    import subprocess
     process = subprocess.run(
         [ASTERISK_CLI, "-rx", *args],
         capture_output=True,
@@ -151,12 +146,9 @@ async def endpoint_status() -> List[Dict[str, Any]]:
         if not contacts_output:
             return []
 
-        # Cleanup must happen from the actual channel list, before building the
-        # status response. The endpoint is polled by the controller UI, so this
-        # gives us a server-side safety net on every poll and every page reload.
         await _cleanup_controller_channels(channels_output)
 
-        # Re-read after cleanup so the API does not report stale duplicate legs.
+        # Re-read after cleanup so the API reports the current state.
         channels_output = await _run_cli("core show channels concise")
         contacts = _parse_contacts(contacts_output)
         active_channels = _parse_active_channels(channels_output)
@@ -174,5 +166,5 @@ async def endpoint_status() -> List[Dict[str, Any]]:
                 "asterisk_state": asterisk_state,
             })
         return result
-    except (OSError, asyncio.TimeoutError):
+    except (OSError, asyncio.TimeoutError, subprocess.TimeoutExpired):
         return []
