@@ -87,15 +87,12 @@ async def _enforce_single_controller_channel(channels_output: str, extension: st
     if len(channels) <= 1:
         return channels[0] if channels else ""
 
-    # Keep the newest browser session and explicitly terminate older sessions.
     channels.sort(key=_channel_sequence)
     keep = channels[-1]
     for channel in channels[:-1]:
-        # asterisk -rx accepts the complete CLI command as one argument.
         try:
             await _run_cli(f"channel request hangup {channel}")
-        except (OSError, asyncio.TimeoutError, subprocess.TimeoutExpired):
-            # The channel can disappear between the concise listing and hangup.
+        except (OSError, subprocess.TimeoutExpired):
             continue
     return keep
 
@@ -129,7 +126,11 @@ def _run_cli_sync(*args: str) -> str:
 
 
 async def _run_cli(*args: str) -> str:
-    return await asyncio.to_thread(_run_cli_sync, *args)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _run_cli_sync, *args)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
 
 
 async def active_channel_details() -> List[Dict[str, str]]:
@@ -148,7 +149,7 @@ async def endpoint_status() -> List[Dict[str, Any]]:
 
         await _cleanup_controller_channels(channels_output)
 
-        # Re-read after cleanup so the API reports the current state.
+        # Re-read after cleanup so the API does not report stale duplicate legs.
         channels_output = await _run_cli("core show channels concise")
         contacts = _parse_contacts(contacts_output)
         active_channels = _parse_active_channels(channels_output)
