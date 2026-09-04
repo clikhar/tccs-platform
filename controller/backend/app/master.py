@@ -278,3 +278,7 @@ async def master_stations(db:AsyncSession=Depends(get_db),admin:dict=Depends(req
 @router.get("/summary")
 async def master_summary(db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     sections=await db.execute(text("SELECT COUNT(*) FROM sections WHERE enabled")); stations=await db.execute(text("SELECT COUNT(*) FROM stations WHERE enabled")); types=await db.execute(text("SELECT COUNT(*) FROM station_types WHERE enabled")); controllers=await db.execute(text("SELECT COUNT(*) FROM controllers WHERE enabled")); groups=await db.execute(text("SELECT COUNT(*) FROM station_groups WHERE enabled")); return {"sections":int(sections.scalar_one()),"stations":int(stations.scalar_one()),"station_types":int(types.scalar_one()),"controllers":int(controllers.scalar_one()),"station_groups":int(groups.scalar_one())}
+
+# Controller SIP account management is mounted under the existing master API prefix.
+from .controller_sip import router as controller_sip_router
+router.include_router(controller_sip_router)
