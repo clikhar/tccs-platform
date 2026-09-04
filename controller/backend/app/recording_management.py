@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 from pathlib import Path
 
@@ -46,7 +47,14 @@ async def play_recording(filename: str, admin: dict = Depends(require_admin)):
     path = _recording_path(filename)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Recording not found")
-    return FileResponse(path, media_type="audio/wav", filename=path.name)
+    media_type = mimetypes.guess_type(path.name)[0] or "audio/wav"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=path.name,
+        content_disposition_type="inline",
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 @router.get("/{filename}/download")
@@ -54,7 +62,12 @@ async def download_recording(filename: str, admin: dict = Depends(require_admin)
     path = _recording_path(filename)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Recording not found")
-    return FileResponse(path, media_type="audio/wav", filename=path.name, content_disposition_type="attachment")
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        filename=path.name,
+        content_disposition_type="attachment",
+    )
 
 
 @router.delete("/{filename}")
