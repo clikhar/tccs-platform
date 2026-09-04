@@ -110,10 +110,14 @@ async def originate_to_conference(extension: str, conference: str) -> Dict[str, 
     try:
         await _login(reader, writer)
         originate_id = f"tccs-originate-{uuid.uuid4()}"
+        controller_extension = "9999"
+        match = re.fullmatch(r"TCCS-CTRL-(9\d{3})", str(conference).strip(), re.IGNORECASE)
+        if match:
+            controller_extension = match.group(1)
         await _send_action(writer, "\r\n".join([
             "Action: Originate", f"ActionID: {originate_id}",
             f"Channel: PJSIP/{extension}", "Context: tccs-stations", "Exten: 900",
-            "Priority: 1", "Timeout: 30000", "CallerID: TCCS Controller <9999>",
+            "Priority: 1", "Timeout: 30000", f"CallerID: TCCS Controller <{controller_extension}>",
             "Async: true", f"Variable: TCCS_CONFERENCE={conference}",
         ]))
         response = await _read_action_response(reader, originate_id)
