@@ -6,6 +6,7 @@ import mimetypes
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -41,7 +42,7 @@ def _can_manage(user: dict) -> bool:
     return user.get("role") in {ROLE_TESTROOM, ROLE_ADMIN}
 
 
-def _history_filters(call_type: str | None, status: str | None, date_from: str | None, date_to: str | None):
+def _history_filters(call_type: Optional[str], status: Optional[str], date_from: Optional[str], date_to: Optional[str]):
     clauses = []
     params: dict = {}
     if call_type and call_type.upper() != "ALL":
@@ -75,7 +76,7 @@ def _history_filters(call_type: str | None, status: str | None, date_from: str |
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
-async def _history_rows(call_type: str | None, status: str | None, date_from: str | None, date_to: str | None, limit: int = 500):
+async def _history_rows(call_type: Optional[str], status: Optional[str], date_from: Optional[str], date_to: Optional[str], limit: int = 500):
     where, params = _history_filters(call_type, status, date_from, date_to)
     params["limit"] = max(1, min(limit, 5000))
     async with SessionLocal() as db:
@@ -95,8 +96,8 @@ def _serialize(row: dict) -> dict:
 
 
 @router.get("/history")
-async def recording_history(call_type: str | None = Query(None), status: str | None = Query(None),
-                            date_from: str | None = Query(None), date_to: str | None = Query(None),
+async def recording_history(call_type: Optional[str] = Query(None), status: Optional[str] = Query(None),
+                            date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
                             limit: int = Query(500, ge=1, le=5000), user: dict = Depends(require_user)):
     if not _can_manage(user):
         raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
@@ -104,8 +105,8 @@ async def recording_history(call_type: str | None = Query(None), status: str | N
 
 
 @router.get("/history/export.csv")
-async def export_history_csv(call_type: str | None = Query(None), status: str | None = Query(None),
-                             date_from: str | None = Query(None), date_to: str | None = Query(None),
+async def export_history_csv(call_type: Optional[str] = Query(None), status: Optional[str] = Query(None),
+                             date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
                              user: dict = Depends(require_user)):
     if not _can_manage(user):
         raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
@@ -123,8 +124,8 @@ async def export_history_csv(call_type: str | None = Query(None), status: str | 
 
 
 @router.get("/history/export.pdf")
-async def export_history_pdf(call_type: str | None = Query(None), status: str | None = Query(None),
-                             date_from: str | None = Query(None), date_to: str | None = Query(None),
+async def export_history_pdf(call_type: Optional[str] = Query(None), status: Optional[str] = Query(None),
+                             date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None),
                              user: dict = Depends(require_user)):
     if not _can_manage(user):
         raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
