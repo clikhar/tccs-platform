@@ -14,6 +14,6 @@ const originalFetch=window.fetch.bind(window);
 window.fetch=async function(input,init){init=init||{};const url=typeof input==='string'?input:(input&&input.url)||'';if(url.startsWith('/api/')||url.includes(':8000')){const headers=new Headers(init.headers||((input&&input.headers)||{}));const t=token();if(t&&!headers.has('Authorization'))headers.set('Authorization','Bearer '+t);init.headers=headers}
 const response=await originalFetch(input,init);const u=user();
 if(u&&url.includes('/api/v1/stations')&&!url.includes('/order')&&response.ok){try{const data=await response.clone().json();let sectionId=null;if(u.role==='CONTROLLER')sectionId=u.controller&&u.controller.section_id;else if(location.pathname==='/controller.html'){const selected=await controllerContext();sectionId=selected&&selected.section_id}
-if(sectionId!=null&&Array.isArray(data)){const filtered=data.filter(s=>Number(s.section_id)===Number(sectionId)).map(s=>Object.assign({},s,{section_id:1}));return new Response(JSON.stringify(filtered),{status:response.status,statusText:response.statusText,headers:new Headers(response.headers)})}}catch{}}
+if(sectionId!=null&&Array.isArray(data)){const filtered=data.filter(s=>Number(s.section_id)===Number(sectionId));return new Response(JSON.stringify(filtered),{status:response.status,statusText:response.statusText,headers:new Headers(response.headers)})}}catch{}}
 return response};
 })();
