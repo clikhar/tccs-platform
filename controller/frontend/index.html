@@ -10,13 +10,14 @@
 </style>
 </head>
 <body>
-<section class="login"><div class="brand"><b>TCCS</b><div>TRAIN CONTROL COMMUNICATION SYSTEM</div></div><h2>USER LOGIN</h2><div id="msg" class="msg" style="display:none"></div><div class="field"><label>USERNAME</label><input id="username" autocomplete="username" autofocus></div><div class="field"><label>PASSWORD</label><input id="password" type="password" autocomplete="current-password"></div><button id="login" class="btn">LOGIN</button><div class="role"><b>Authorized roles</b><br>Controller • Testroom • Administrator</div></section>
+<section class="login"><div class="brand"><b>TCCS</b><div>TRAIN CONTROL COMMUNICATION SYSTEM</div></div><h2>USER LOGIN</h2><div id="msg" class="msg" style="display:none"></div><div class="field"><label>USERNAME</label><input id="username" autocomplete="username"></div><div class="field"><label>PASSWORD</label><input id="password" type="password" autocomplete="current-password"></div><button id="login" class="btn">LOGIN</button><div class="role"><b>Authorized roles</b><br>Controller • Testroom • Administrator</div></section>
 <script>
 (function(){
-const API=location.protocol+'//'+location.hostname+':8000',tokenKey='tccs_user_token',userKey='tccs_user';
+'use strict';
+const API='/api',tokenKey='tccs_user_token',userKey='tccs_user';
 const $=id=>document.getElementById(id),show=(t,e)=>{const m=$('msg');m.textContent=t;m.className='msg'+(e?' err':'');m.style.display=t?'block':'none'};
 if(localStorage.getItem(tokenKey)){try{const u=JSON.parse(localStorage.getItem(userKey)||'null');if(u)location.replace(u.role==='ADMINISTRATOR'?'/admin.html':u.role==='TESTROOM'?'/testroom.html':'/controller.html')}catch{}}
-async function login(){const b=$('login');b.disabled=true;b.textContent='AUTHENTICATING...';show('');try{const r=await fetch(API+'/api/v1/master/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value.trim(),password:$('password').value})});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||('HTTP '+r.status));localStorage.setItem(tokenKey,d.access_token);localStorage.setItem(userKey,JSON.stringify(d));location.replace(d.role==='ADMINISTRATOR'?'/admin.html':d.role==='TESTROOM'?'/testroom.html':'/controller.html')}catch(e){show(e.message,true)}finally{b.disabled=false;b.textContent='LOGIN'}}
+async function login(){const b=$('login');b.disabled=true;b.textContent='AUTHENTICATING...';show('');try{const r=await fetch(API+'/v1/master/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value.trim(),password:$('password').value})});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||('HTTP '+r.status));localStorage.setItem(tokenKey,d.access_token);localStorage.setItem(userKey,JSON.stringify(d));location.replace(d.role==='ADMINISTRATOR'?'/admin.html':d.role==='TESTROOM'?'/testroom.html':'/controller.html')}catch(e){show(e.message||'Unable to connect to TCCS server',true)}finally{b.disabled=false;b.textContent='LOGIN'}}
 $('login').addEventListener('click',login);$('password').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 })();
 </script>
