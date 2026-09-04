@@ -26,7 +26,6 @@ class Controller(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
     section_id: Mapped[Optional[int]] = mapped_column(ForeignKey("sections.id"))
-    sip_account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("sip_accounts.id", ondelete="SET NULL"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
