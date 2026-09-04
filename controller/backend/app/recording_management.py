@@ -51,9 +51,11 @@ async def play_recording(filename: str, admin: dict = Depends(require_admin)):
     return FileResponse(
         path,
         media_type=media_type,
-        filename=path.name,
-        content_disposition_type="inline",
-        headers={"Accept-Ranges": "bytes"},
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="{path.name}"',
+        },
     )
 
 
@@ -65,8 +67,10 @@ async def download_recording(filename: str, admin: dict = Depends(require_admin)
     return FileResponse(
         path,
         media_type="audio/wav",
-        filename=path.name,
-        content_disposition_type="attachment",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{path.name}"',
+        },
     )
 
 
