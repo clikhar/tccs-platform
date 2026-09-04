@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from .ami import originate_to_conference
+import re
+
+from .ami import conference_channels, enforce_single_conference_channel, originate_to_conference
+from .asterisk import active_channel_details
 from .db import SessionLocal
 from sqlalchemy import text
 
@@ -36,6 +39,47 @@ async def conference_for_station(extension: str) -> str:
     return controller_conference(row.extension if row else None)
 
 
+def _active_station_channels(channels: list[dict[str, str]], extension: str) -> list[dict[str, str]]:
+    prefix = f"PJSIP/{str(extension).strip()}-"
+    return [
+        channel for channel in channels
+        if channel.get("channel", "").startswith(prefix)
+        and channel.get("context") in {"tccs-stations", "tccs-controller"}
+    ]
+
+
+async def _reject_duplicate_station_call(extension: str) -> None:
+    """Reject a new call when the station already has a live SIP channel.
+
+    This is deliberately server-side. The browser's state can be stale after a
+    refresh, reconnect, or network interruption, so Asterisk is the source of
+    truth for whether the station is already engaged.
+    """
+    channels = await active_channel_details()
+    active = _active_station_channels(channels, extension)
+    if active:
+        states = sorted({c.get("state", "UNKNOWN") for c in active})
+        raise RuntimeError(
+            f"Station {extension} already has an active SIP call ({', '.join(states)})"
+        )
+
+
 async def call_station(extension: str, conference: str | None = None):
-    target_conference = conference or await conference_for_station(extension)
-    return await originate_to_conference(extension, target_conference)
+    extension = str(extension).strip()
+    if not re.fullmatch(r"10\d{2}", extension):
+        raise ValueError("Invalid station SIP extension")
+
+    # PostgreSQL advisory lock closes the race where two HTTP requests arrive
+    # for the same station at almost exactly the same time.
+    lock_key = abs(hash(extension)) % (2**31)
+    async with SessionLocal() as db:
+        await db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+        await _reject_duplicate_station_call(extension)
+        target_conference = conference or await conference_for_station(extension)
+
+        # If Asterisk has retained duplicate conference channels from an older
+        # browser/SIP session, clean them before originating another call.
+        await enforce_single_conference_channel(extension, target_conference)
+        response = await originate_to_conference(extension, target_conference)
+        await db.commit()
+        return response
