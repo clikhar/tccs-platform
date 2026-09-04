@@ -10,6 +10,7 @@ from typing import Dict, List, Set
 from sqlalchemy import text
 
 from .asterisk import active_channel_details
+from .ami import enforce_single_conference_channel
 from .db import SessionLocal
 from .master import router as master_router
 from .recording_management import router as recording_management_router
@@ -27,12 +28,14 @@ CONTROLLER_CONFERENCE_PREFIX = "TCCS-CTRL-"
 
 
 def _conference_from_channel(channel: Dict[str, str]) -> str | None:
-    if channel.get("context") != "tccs-stations" or channel.get("application") != "CONFBRIDGE":
+    if channel.get("context") not in {"tccs-stations", "tccs-controller"} or channel.get("application") != "CONFBRIDGE":
         return None
     conference = channel.get("data", "").split(",", 1)[0].strip()
-    if not conference.upper().startswith(CONTROLLER_CONFERENCE_PREFIX):
+    if not conference:
         return None
-    return conference
+    if conference.upper().startswith(CONTROLLER_CONFERENCE_PREFIX) or conference == LEGACY_CONFERENCE:
+        return conference
+    return None
 
 
 def _controller_conferences(channels: List[Dict[str, str]]) -> Set[str]:
@@ -132,6 +135,35 @@ async def _stop_recording(conference: str) -> None:
         raise RuntimeError(output or f"Asterisk did not stop recording {conference}")
 
 
+async def _enforce_controller_sessions(channels: List[Dict[str, str]]) -> None:
+    """Keep one controller SIP session per controller conference.
+
+    Browser refreshes and interrupted WebRTC sessions can leave an old
+    PJSIP/9999 channel behind. Asterisk is the source of truth, so stale
+    controller conference channels are cleaned automatically once per poll.
+    """
+    controllers: Set[tuple[str, str]] = set()
+    for channel in channels:
+        if channel.get("context") != "tccs-controller" or channel.get("application") != "CONFBRIDGE":
+            continue
+        extension = channel.get("extension", "").strip()
+        conference = channel.get("data", "").split(",", 1)[0].strip()
+        if re.fullmatch(r"9\d{3}", extension) and conference:
+            controllers.add((extension, conference))
+
+    # SECTION01 is retained for compatibility with the currently deployed
+    # controller dialplan, where extension 9999 joins SECTION01.
+    if any(c.get("extension", "").strip() == "9999" and c.get("context") == "tccs-controller" for c in channels):
+        controllers.add(("9999", "SECTION01"))
+
+    for extension, conference in controllers:
+        try:
+            await enforce_single_conference_channel(extension, conference)
+        except Exception:
+            # Cleanup must never stop recording/history synchronization.
+            continue
+
+
 async def recording_loop() -> None:
     os.makedirs(MONITOR_DIR, exist_ok=True)
     async with SessionLocal() as db:
@@ -139,6 +171,7 @@ async def recording_loop() -> None:
     while True:
         try:
             channels = await active_channel_details()
+            await _enforce_controller_sessions(channels)
             await _sync_outbound_call_history(channels)
             conferences = _controller_conferences(channels)
             for conference in conferences:
