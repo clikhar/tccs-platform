@@ -52,10 +52,8 @@ async def user_me(user:dict=Depends(require_user),db:AsyncSession=Depends(get_db
  return {"id":user["id"],"username":user["username"],"role":user["role"],"controller_id":user.get("controller_id"),"controller":controller}
 @router.get("/available-controllers")
 async def available_controllers(user:dict=Depends(require_user),db:AsyncSession=Depends(get_db)):
- q="SELECT c.id,c.code,c.name,c.section_id,s.code AS section_code,s.name AS section_name FROM controllers c LEFT JOIN sections s ON s.id=c.section_id WHERE c.enabled=TRUE"
- params={}
- if user["role"]==ROLE_CONTROLLER:
-  q+=" AND c.id=:controller_id"; params["controller_id"]=user.get("controller_id")
+ q="SELECT c.id,c.code,c.name,c.section_id,s.code AS section_code,s.name AS section_name FROM controllers c LEFT JOIN sections s ON s.id=c.section_id WHERE c.enabled=TRUE"; params={}
+ if user["role"]==ROLE_CONTROLLER: q+=" AND c.id=:controller_id"; params["controller_id"]=user.get("controller_id")
  q+=" ORDER BY c.code"; result=await db.execute(text(q),params); return [dict(r._mapping) for r in result]
 @router.get("/users")
 async def list_users(db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
@@ -71,8 +69,9 @@ async def create_user(payload:dict=Body(...),db:AsyncSession=Depends(get_db),adm
   except (TypeError,ValueError): raise HTTPException(400,"Controller user requires a controller assignment")
   if (await db.execute(text("SELECT id FROM controllers WHERE id=:id AND enabled=TRUE"),{"id":cid})).first() is None: raise HTTPException(400,"Assigned controller not found or disabled")
  else: cid=None
+ db_role="ADMIN" if role==ROLE_ADMIN else role
  try:
-  r=await db.execute(text("INSERT INTO admin_users(username,password_hash,role,enabled,controller_id) VALUES(:username,:password_hash,:role,:enabled,:controller_id) RETURNING id,username,role,enabled,controller_id"),{"username":username,"password_hash":_hash_password(password),"role":role,"enabled":bool(payload.get("enabled",True)),"controller_id":cid}); await db.commit(); return dict(r.first()._mapping)
+  r=await db.execute(text("INSERT INTO admin_users(username,password_hash,role,enabled,controller_id) VALUES(:username,:password_hash,:role,:enabled,:controller_id) RETURNING id,username,role,enabled,controller_id"),{"username":username,"password_hash":_hash_password(password),"role":db_role,"enabled":bool(payload.get("enabled",True)),"controller_id":cid}); await db.commit(); return dict(r.first()._mapping)
  except Exception as exc:
   await db.rollback()
   if "duplicate" in str(exc).lower() or "unique" in str(exc).lower(): raise HTTPException(409,"Username already exists")
@@ -91,10 +90,11 @@ async def update_user(user_id:int,payload:dict=Body(...),db:AsyncSession=Depends
  else: cid=None
  pw=payload.get("password")
  if pw is not None and len(str(pw))<6: raise HTTPException(400,"Password must be at least 6 characters")
+ db_role="ADMIN" if role==ROLE_ADMIN else role
  try:
-  if pw: await db.execute(text("UPDATE admin_users SET username=:username,password_hash=:password_hash,role=:role,enabled=:enabled,controller_id=:controller_id WHERE id=:id"),{"id":user_id,"username":username,"password_hash":_hash_password(str(pw)),"role":role,"enabled":enabled,"controller_id":cid})
-  else: await db.execute(text("UPDATE admin_users SET username=:username,role=:role,enabled=:enabled,controller_id=:controller_id WHERE id=:id"),{"id":user_id,"username":username,"role":role,"enabled":enabled,"controller_id":cid})
-  await db.commit(); r=(await db.execute(text("SELECT id,username,role,enabled,controller_id FROM admin_users WHERE id=:id"),{"id":user_id})).first(); return dict(r._mapping)
+  if pw: await db.execute(text("UPDATE admin_users SET username=:username,password_hash=:password_hash,role=:role,enabled=:enabled,controller_id=:controller_id WHERE id=:id"),{"id":user_id,"username":username,"password_hash":_hash_password(str(pw)),"role":db_role,"enabled":enabled,"controller_id":cid})
+  else: await db.execute(text("UPDATE admin_users SET username=:username,role=:role,enabled=:enabled,controller_id=:controller_id WHERE id=:id"),{"id":user_id,"username":username,"role":db_role,"enabled":enabled,"controller_id":cid})
+  await db.commit(); r=(await db.execute(text("SELECT id,username,CASE WHEN role='ADMIN' THEN 'ADMINISTRATOR' ELSE role END AS role,enabled,controller_id FROM admin_users WHERE id=:id"),{"id":user_id})).first(); return dict(r._mapping)
  except Exception as exc:
   await db.rollback()
   if "duplicate" in str(exc).lower() or "unique" in str(exc).lower(): raise HTTPException(409,"Username already exists")
@@ -112,4 +112,4 @@ async def list_roles(admin:dict=Depends(require_admin)):
 async def permissions(user:dict=Depends(require_user)):
  return {"role":user["role"],"permissions":["OPERATING_ASSIGNED_CONTROLLER"] if user["role"]==ROLE_CONTROLLER else ["OPERATING_ALL_CONTROLLERS","RECORDINGS"] if user["role"]==ROLE_TESTROOM else ["ALL"]}
 async def ensure_user_schema(db:AsyncSession)->None:
- await db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS controller_id BIGINT REFERENCES controllers(id) ON DELETE SET NULL")); await db.execute(text("CREATE INDEX IF NOT EXISTS idx_admin_users_controller ON admin_users(controller_id)")); await db.commit()
+ await db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS controller_id BIGINT REFERENCES controllers(id) ON DELETE SET NULL")); await db.execute(text("UPDATE admin_users SET role='ADMIN' WHERE role='ADMINISTRATOR'")); await db.execute(text("CREATE INDEX IF NOT EXISTS idx_admin_users_controller ON admin_users(controller_id)")); await db.commit()
