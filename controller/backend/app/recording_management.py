@@ -4,7 +4,7 @@ import csv
 import io
 import mimetypes
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -15,8 +15,9 @@ from reportlab.pdfgen import canvas
 from sqlalchemy import text
 
 from .db import SessionLocal
-from .master import ROLE_ADMIN, ROLE_TESTROOM, require_user, router as master_router
+from .master import router as master_router
 from .server_management import router as server_management_router
+from .user_management import ROLE_ADMIN, ROLE_TESTROOM, require_user
 
 MONITOR_DIR = Path(os.getenv("TCCS_RECORDING_DIR", "/var/spool/asterisk/monitor")).resolve()
 router = APIRouter(prefix="/recordings", tags=["recordings"])
@@ -49,27 +50,37 @@ def _history_filters(call_type: Optional[str], status: Optional[str], date_from:
     params: dict = {}
     if call_type and call_type.upper() != "ALL":
         ct = call_type.upper()
-        if ct == "MISSED": clauses.append("status = 'MISSED'")
+        if ct == "MISSED":
+            clauses.append("status = 'MISSED'")
         elif ct in {"INCOMING", "DIRECT", "GROUP", "SECTION", "GENERAL"}:
-            clauses.append("call_type = :call_type"); params["call_type"] = ct
-        else: raise HTTPException(status_code=400, detail="Invalid call type filter")
+            clauses.append("call_type = :call_type")
+            params["call_type"] = ct
+        else:
+            raise HTTPException(status_code=400, detail="Invalid call type filter")
     if status and status.upper() != "ALL":
         st = status.upper()
-        if st not in {"ORIGINATED", "RINGING", "ANSWERED", "ENDED", "MISSED"}: raise HTTPException(status_code=400, detail="Invalid status filter")
-        clauses.append("status = :status"); params["status"] = st
+        if st not in {"ORIGINATED", "RINGING", "ANSWERED", "ENDED", "MISSED"}:
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        clauses.append("status = :status")
+        params["status"] = st
     if date_from:
-        try: params["date_from"] = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
-        except ValueError: raise HTTPException(status_code=400, detail="Invalid date_from; use ISO date/time")
+        try:
+            params["date_from"] = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from; use ISO date/time")
         clauses.append("originated_at >= :date_from")
     if date_to:
-        try: params["date_to"] = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
-        except ValueError: raise HTTPException(status_code=400, detail="Invalid date_to; use ISO date/time")
+        try:
+            params["date_to"] = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to; use ISO date/time")
         clauses.append("originated_at <= :date_to")
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
 async def _history_rows(call_type: Optional[str], status: Optional[str], date_from: Optional[str], date_to: Optional[str], limit: int = 500):
-    where, params = _history_filters(call_type, status, date_from, date_to); params["limit"] = max(1, min(limit, 5000))
+    where, params = _history_filters(call_type, status, date_from, date_to)
+    params["limit"] = max(1, min(limit, 5000))
     async with SessionLocal() as db:
         result = await db.execute(text(f"""
             SELECT id, call_type, source_extension, target_station_number, target_name,
@@ -80,19 +91,22 @@ async def _history_rows(call_type: Optional[str], status: Optional[str], date_fr
 
 
 def _serialize(row: dict) -> dict:
-    def dt(value): return value.isoformat() if hasattr(value, "isoformat") else value
+    def dt(value):
+        return value.isoformat() if hasattr(value, "isoformat") else value
     return {**row, "originated_at": dt(row.get("originated_at")), "answered_at": dt(row.get("answered_at")), "ended_at": dt(row.get("ended_at"))}
 
 
 @router.get("/history")
 async def recording_history(call_type: Optional[str] = Query(None), status: Optional[str] = Query(None), date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None), limit: int = Query(500, ge=1, le=5000), user: dict = Depends(require_user)):
-    if not _can_manage(user): raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
+    if not _can_manage(user):
+        raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
     return [_serialize(row) for row in await _history_rows(call_type, status, date_from, date_to, limit)]
 
 
 @router.get("/history/export.csv")
 async def export_history_csv(call_type: Optional[str] = Query(None), status: Optional[str] = Query(None), date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None), user: dict = Depends(require_user)):
-    if not _can_manage(user): raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
+    if not _can_manage(user):
+        raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
     rows = [_serialize(row) for row in await _history_rows(call_type, status, date_from, date_to, 5000)]
     fields = ["id", "call_type", "source_extension", "target_station_number", "target_name", "group_code", "status", "originated_at", "answered_at", "ended_at", "duration_seconds"]
     stream = io.StringIO(); writer = csv.writer(stream); writer.writerow(fields)
@@ -103,7 +117,8 @@ async def export_history_csv(call_type: Optional[str] = Query(None), status: Opt
 
 @router.get("/history/export.pdf")
 async def export_history_pdf(call_type: Optional[str] = Query(None), status: Optional[str] = Query(None), date_from: Optional[str] = Query(None), date_to: Optional[str] = Query(None), user: dict = Depends(require_user)):
-    if not _can_manage(user): raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
+    if not _can_manage(user):
+        raise HTTPException(status_code=403, detail="Recording access is restricted to Testroom and Administrator users")
     rows = [_serialize(row) for row in await _history_rows(call_type, status, date_from, date_to, 5000)]
     output = io.BytesIO(); page = landscape(A4); pdf = canvas.Canvas(output, pagesize=page); width, height = page
     headers = ["TIME", "TYPE", "SOURCE", "TARGET", "STATUS", "ANSWERED", "ENDED", "DURATION"]; x = [24, 145, 225, 295, 430, 510, 590, 680]
