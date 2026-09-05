@@ -112,18 +112,25 @@ def _generate_extensions(data: Dict[str, Any]) -> str:
         "; Generated at " + datetime.now(timezone.utc).isoformat(), "", "[tccs-stations]",
         "exten => 900,1,NoOp(TCCS station joining ${TCCS_CONFERENCE})", " same => n,Answer()", " same => n,ExecIf($[\"${TCCS_CONFERENCE}\"=\"\"]?Hangup())", " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_station)", " same => n,Hangup()", "",
         "exten => _10XX,1,NoOp(TCCS station call to ${EXTEN})", " same => n,Dial(PJSIP/${EXTEN},30)", " same => n,Hangup()", "",
-        "[tccs-controller]",
-        "exten => 900,1,NoOp(TCCS controller ${CALLERID(num)} joining its controller conference)",
-        " same => n,Answer()",
-        " same => n,Set(TCCS_CONFERENCE=TCCS-CTRL-${CALLERID(num)})",
-        " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_controller)",
-        " same => n,Hangup()", "",
     ]
     for controller in data["controllers"]:
         if not controller["enabled"] or not controller.get("sip_extension"): continue
         ext = _safe(controller["sip_extension"])
         lines += [f"; Controller {_safe(controller['code'])}: {ext}", f"exten => {ext},1,NoOp(TCCS station ${{CALLERID(num)}} calling controller {ext})", " same => n,Dial(PJSIP/" + ext + ",30)", " same => n,Hangup()", ""]
-    lines += ["; Direct station-to-controller dialing", "exten => _9XXX,1,NoOp(TCCS station ${CALLERID(num)} calling controller ${EXTEN})", " same => n,Dial(PJSIP/${EXTEN},30)", " same => n,Hangup()", ""]
+    lines += [
+        "; Direct station-to-controller dialing",
+        "exten => _9XXX,1,NoOp(TCCS station ${CALLERID(num)} calling controller ${EXTEN})",
+        " same => n,Dial(PJSIP/${EXTEN},30)",
+        " same => n,Hangup()",
+        "",
+        "[tccs-controller]",
+        "exten => 900,1,NoOp(TCCS controller ${CALLERID(num)} joining its controller conference)",
+        " same => n,Answer()",
+        " same => n,Set(TCCS_CONFERENCE=TCCS-CTRL-${CALLERID(num)})",
+        " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_controller)",
+        " same => n,Hangup()",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -222,86 +229,95 @@ async def list_servers(db: AsyncSession = Depends(get_db), admin: dict = Depends
 
 @router.post("")
 async def create_server(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
-    name = _safe(payload.get("name")) or "Asterisk Server"
-    role = _safe(payload.get("role")) or "PRIMARY"
+    await ensure_server_schema(db)
+    name = _safe(payload.get("name"))
+    role = _safe(payload.get("role") or "PRIMARY").upper()
     ip = _safe(payload.get("ip_address"))
-    username = _safe(payload.get("ssh_username")) or "root"
+    username = _safe(payload.get("ssh_username") or "root")
     password = _safe(payload.get("ssh_password"))
     port = int(payload.get("ssh_port") or 22)
-    if not ip or not password:
-        raise HTTPException(400, "IP address and SSH password are required")
-    await ensure_server_schema(db)
+    if not name or not ip or not password:
+        raise HTTPException(400, "name, ip_address and ssh_password are required")
     try:
-        result = await db.execute(text("INSERT INTO asterisk_servers (name,role,ip_address,ssh_username,ssh_password_encrypted,ssh_port,enabled) VALUES (:name,:role,:ip,:username,:password,:port,:enabled) RETURNING id"), {"name":name,"role":role,"ip":ip,"username":username,"password":_encrypt(password),"port":port,"enabled":bool(payload.get("enabled",True))})
+        result = await db.execute(text("INSERT INTO asterisk_servers (name,role,ip_address,ssh_username,ssh_password_encrypted,ssh_port) VALUES (:name,:role,:ip,:username,:password,:port) RETURNING id"), {"name":name,"role":role,"ip":ip,"username":username,"password":_encrypt(password),"port":port})
         await db.commit()
-        return {"id":result.scalar_one(),"status":"CREATED"}
-    except Exception as exc:
+        return {"id": result.scalar_one(), "status":"CREATED"}
+    except Exception:
         await db.rollback()
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(400, "Unable to create Asterisk server; check for duplicate IP or invalid data")
 
 
 @router.put("/{server_id}")
 async def update_server(server_id: int, payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
     await ensure_server_schema(db)
     row = (await db.execute(text("SELECT * FROM asterisk_servers WHERE id=:id"), {"id":server_id})).mappings().first()
-    if row is None: raise HTTPException(404, "Asterisk server not found")
+    if not row: raise HTTPException(404, "Asterisk server not found")
     fields=[]; params={"id":server_id}
-    for key,col in (("name","name"),("role","role"),("ip_address","ip_address"),("ssh_username","ssh_username"),("ssh_port","ssh_port"),("enabled","enabled")):
+    for key, column in (("name","name"),("role","role"),("ip_address","ip_address"),("ssh_username","ssh_username"),("ssh_port","ssh_port"),("enabled","enabled")):
         if key in payload:
-            fields.append(f"{col}=:{key}"); params[key]=payload[key]
+            fields.append(f"{column}=:{key}"); params[key]=payload[key]
     if payload.get("ssh_password"):
-        fields.append("ssh_password_encrypted=:ssh_password_encrypted"); params["ssh_password_encrypted"]=_encrypt(_safe(payload["ssh_password"]))
-    if fields:
-        fields.append("updated_at=NOW()")
-        await db.execute(text(f"UPDATE asterisk_servers SET {','.join(fields)} WHERE id=:id"), params); await db.commit()
-    return {"status":"UPDATED"}
+        fields.append("ssh_password_encrypted=:password"); params["password"]=_encrypt(_safe(payload["ssh_password"]))
+    if not fields: return {"status":"UNCHANGED"}
+    fields.append("updated_at=NOW()")
+    try:
+        await db.execute(text(f"UPDATE asterisk_servers SET {', '.join(fields)} WHERE id=:id"), params); await db.commit(); return {"status":"UPDATED"}
+    except Exception:
+        await db.rollback(); raise HTTPException(400, "Unable to update Asterisk server")
 
 
 @router.delete("/{server_id}")
 async def delete_server(server_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
     await ensure_server_schema(db)
-    await db.execute(text("DELETE FROM asterisk_servers WHERE id=:id"), {"id":server_id}); await db.commit()
-    return {"status":"DELETED"}
+    await db.execute(text("DELETE FROM asterisk_servers WHERE id=:id"), {"id":server_id}); await db.commit(); return {"status":"DELETED"}
 
 
-async def _get_server(db: AsyncSession, server_id: int) -> Dict[str, Any]:
-    row=(await db.execute(text("SELECT * FROM asterisk_servers WHERE id=:id AND enabled=TRUE"),{"id":server_id})).mappings().first()
-    if row is None: raise HTTPException(404,"Enabled Asterisk server not found")
+async def _server_or_404(server_id: int, db: AsyncSession) -> Dict[str, Any]:
+    row = (await db.execute(text("SELECT * FROM asterisk_servers WHERE id=:id"), {"id":server_id})).mappings().first()
+    if not row: raise HTTPException(404, "Asterisk server not found")
     return dict(row)
 
 
 @router.post("/{server_id}/test")
 async def test_server(server_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
-    await ensure_server_schema(db); server=await _get_server(db,server_id)
-    try: return await _run_test(server)
-    except Exception as exc: raise HTTPException(502,f"Server connection failed: {exc}") from exc
+    server = await _server_or_404(server_id, db)
+    try: result=await _run_test(server)
+    except Exception as exc: raise HTTPException(502, f"Asterisk server test failed: {exc}") from exc
+    return result
+
+
+@router.post("/{server_id}/preview")
+async def preview_server(server_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+    server = await _server_or_404(server_id, db)
+    data = await _query_config_data(db)
+    return {"server": {"id":server["id"],"name":server["name"],"role":server["role"],"ip_address":server["ip_address"]}, "files": {"pjsip":_generate_pjsip(data),"extensions":_generate_extensions(data),"confbridge":_generate_confbridge(data)}}
 
 
 @router.post("/{server_id}/sync")
 async def sync_server(server_id: int, db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
-    await ensure_server_schema(db); server=await _get_server(db,server_id); data=await _query_config_data(db)
+    server = await _server_or_404(server_id, db)
+    data = await _query_config_data(db)
     files={PJSIP_FILE:_generate_pjsip(data),EXTENSIONS_FILE:_generate_extensions(data),CONFBRIDGE_FILE:_generate_confbridge(data)}
-    try:
-        result=await _run_sync(server,files)
-        await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status=:status,last_sync_message=:message,updated_at=NOW() WHERE id=:id"),{"id":server_id,"status":result["status"],"message":result["message"]}); await db.commit(); return result
+    try: result=await _run_sync(server, files)
     except Exception as exc:
-        await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status='FAILED',last_sync_message=:message,updated_at=NOW() WHERE id=:id"),{"id":server_id,"message":str(exc)}); await db.commit()
-        raise HTTPException(502,f"Server sync failed: {exc}") from exc
+        await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status='FAILED',last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server_id,"message":str(exc)}); await db.commit()
+        raise HTTPException(502, f"Asterisk server sync failed: {exc}") from exc
+    await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status=:status,last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server_id,"status":result.get("status","SYNCED"),"message":result.get("message","")}); await db.commit()
+    return result
 
 
 @router.post("/sync-all")
-async def sync_all_servers(db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
+async def sync_all(db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
     await ensure_server_schema(db)
-    rows=(await db.execute(text("SELECT * FROM asterisk_servers WHERE enabled=TRUE ORDER BY id"))).mappings().all()
+    rows=(await db.execute(text("SELECT * FROM asterisk_servers WHERE enabled=TRUE ORDER BY CASE role WHEN 'PRIMARY' THEN 1 WHEN 'STANDBY' THEN 2 ELSE 3 END,id"))).mappings().all()
     data=await _query_config_data(db); files={PJSIP_FILE:_generate_pjsip(data),EXTENSIONS_FILE:_generate_extensions(data),CONFBRIDGE_FILE:_generate_confbridge(data)}
     results=[]
     for server in rows:
-        try: results.append({"id":server["id"],**(await _run_sync(dict(server),files))})
-        except Exception as exc: results.append({"id":server["id"],"status":"FAILED","message":str(exc)})
-    return results
-
-
-@router.get("/preview/config")
-async def preview_config(db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
-    await ensure_server_schema(db); data=await _query_config_data(db)
-    return {"pjsip":_generate_pjsip(data),"extensions":_generate_extensions(data),"confbridge":_generate_confbridge(data)}
+        try:
+            result=await _run_sync(dict(server),files)
+            status=result.get("status","SYNCED"); message=result.get("message","")
+        except Exception as exc:
+            status="FAILED"; message=str(exc)
+        await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status=:status,last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server["id"],"status":status,"message":message})
+        results.append({"id":server["id"],"name":server["name"],"status":status,"message":message})
+    await db.commit(); return results
