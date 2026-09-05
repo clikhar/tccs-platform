@@ -147,10 +147,9 @@ async def endpoint_status() -> List[Dict[str, Any]]:
         if not contacts_output:
             return []
 
-        await _cleanup_controller_channels(channels_output)
-
-        # Re-read after cleanup so the API does not report stale duplicate legs.
-        channels_output = await _run_cli("core show channels concise")
+        # Endpoint status is intentionally read-only. Controller-session cleanup
+        # is handled by the background recording/session worker so a cleanup
+        # failure can never turn this status API into HTTP 500.
         contacts = _parse_contacts(contacts_output)
         active_channels = _parse_active_channels(channels_output)
 
