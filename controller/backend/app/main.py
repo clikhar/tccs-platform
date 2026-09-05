@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import Body, Depends, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,6 +112,62 @@ async def asterisk_endpoints() -> List[dict]:
 async def asterisk_channels() -> dict:
     channels = await active_channel_details()
     return {"channels": channels}
+
+@app.get("/api/v1/call-history")
+async def controller_call_history(
+    call_type: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=5000),
+    user: dict = Depends(require_user),
+) -> list:
+    clauses = []
+    params: dict = {"limit": limit}
+    if call_type and call_type.upper() != "ALL":
+        value = call_type.upper()
+        if value == "MISSED":
+            clauses.append("status = 'MISSED'")
+        elif value in {"INCOMING", "DIRECT", "GROUP", "SECTION", "GENERAL"}:
+            clauses.append("call_type = :call_type")
+            params["call_type"] = value
+        else:
+            raise HTTPException(status_code=400, detail="Invalid call type filter")
+    if status and status.upper() != "ALL":
+        value = status.upper()
+        if value not in {"ORIGINATED", "RINGING", "ANSWERED", "ENDED", "MISSED"}:
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        clauses.append("status = :status")
+        params["status"] = value
+    if date_from:
+        try:
+            params["date_from"] = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from; use ISO date/time")
+        clauses.append("originated_at >= :date_from")
+    if date_to:
+        try:
+            params["date_to"] = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to; use ISO date/time")
+        clauses.append("originated_at <= :date_to")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    async with SessionLocal() as db:
+        result = await db.execute(text(f"""
+            SELECT id, call_type, source_extension, target_station_number, target_name,
+                   group_code, status, originated_at, answered_at, ended_at, duration_seconds
+            FROM call_history{where}
+            ORDER BY originated_at DESC
+            LIMIT :limit
+        """), params)
+        rows = []
+        for row in result:
+            item = dict(row._mapping)
+            for key in ("originated_at", "answered_at", "ended_at"):
+                if hasattr(item.get(key), "isoformat"):
+                    item[key] = item[key].isoformat()
+            rows.append(item)
+        return rows
 
 @app.post("/api/v1/calls/direct")
 async def direct_call(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)) -> dict:
