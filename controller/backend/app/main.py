@@ -90,21 +90,6 @@ async def stop_recording_worker() -> None:
     except asyncio.CancelledError:
         pass
 
-
-def _station_out(station: Station, registered: bool = False) -> dict:
-    return {
-        "id": station.id,
-        "station_number": station.station_number,
-        "name": station.name,
-        "location": station.location,
-        "section_id": station.section_id,
-        "sip_extension": station.sip_extension,
-        "station_type": station.station_type,
-        "enabled": station.enabled,
-        "priority": station.priority,
-        "registered": registered,
-    }
-
 @app.get("/api/v1/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -146,74 +131,58 @@ async def direct_call(payload: dict = Body(...), db: AsyncSession = Depends(get_
         raise HTTPException(status_code=409, detail=str(exc))
 
 @app.post("/api/v1/calls/stations/{station_id}")
-async def controller_station_call(
-    station_id: int,
-    payload: dict = Body(default={}),
-    db: AsyncSession = Depends(get_db),
-    user: dict = Depends(require_user),
-) -> dict:
+async def controller_station_call(station_id: int, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
     station = await db.get(Station, station_id)
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
-
-    # A controller may call only stations belonging to its assigned section.
     if user.get("role") == "CONTROLLER":
         controller_id = user.get("controller_id")
         if not controller_id:
             raise HTTPException(status_code=403, detail="Controller is not assigned")
-        row = (await db.execute(
-            text("SELECT section_id FROM controllers WHERE id=:id AND enabled=TRUE"),
-            {"id": controller_id},
-        )).first()
+        row = (await db.execute(text("SELECT section_id FROM controllers WHERE id=:id AND enabled=TRUE"), {"id": controller_id})).first()
         if row is None or row.section_id != station.section_id:
             raise HTTPException(status_code=403, detail="Station is outside the controller's assigned section")
-
     call_type = str(payload.get("call_type") or "DIRECT").strip().upper()
     if call_type not in {"DIRECT", "GENERAL", "SECTION", "GROUP"}:
         raise HTTPException(status_code=400, detail="Invalid call_type")
     group_code = payload.get("group_code")
     if group_code is not None:
         group_code = str(group_code).strip() or None
-
     try:
         result = await call_station(station.sip_extension)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-
-    # Record the outbound origin so call history has an explicit lifecycle row.
     source_extension = str(payload.get("source_extension") or "").strip()
     if not source_extension and user.get("controller_id"):
-        source = (await db.execute(text("""
-            SELECT sa.extension
-            FROM controllers c
-            JOIN sip_accounts sa ON sa.id=c.sip_account_id
-            WHERE c.id=:id
-            LIMIT 1
-        """), {"id": user["controller_id"]})).first()
+        source = (await db.execute(text("SELECT sa.extension FROM controllers c JOIN sip_accounts sa ON sa.id=c.sip_account_id WHERE c.id=:id LIMIT 1"), {"id": user["controller_id"]})).first()
         source_extension = source.extension if source else ""
     if not source_extension:
         source_extension = "9999"
-
     await db.execute(text("""
-        INSERT INTO call_history (
-            call_type, source_extension, target_station_id, target_station_number,
-            target_name, group_code, status, originated_at
-        ) VALUES (
-            :call_type, :source_extension, :target_station_id, :target_station_number,
-            :target_name, :group_code, 'ORIGINATED', :originated_at
-        )
-    """), {
-        "call_type": call_type,
-        "source_extension": source_extension,
-        "target_station_id": station.id,
-        "target_station_number": station.station_number,
-        "target_name": station.name,
-        "group_code": group_code,
-        "originated_at": datetime.now(timezone.utc),
-    })
+        INSERT INTO call_history (call_type, source_extension, target_station_id, target_station_number, target_name, group_code, status, originated_at)
+        VALUES (:call_type, :source_extension, :target_station_id, :target_station_number, :target_name, :group_code, 'ORIGINATED', :originated_at)
+    """), {"call_type": call_type, "source_extension": source_extension, "target_station_id": station.id, "target_station_number": station.station_number, "target_name": station.name, "group_code": group_code, "originated_at": datetime.now(timezone.utc)})
     await db.commit()
+    return result
+
+@app.post("/api/v1/conference/stations/{station_id}/hangup")
+async def conference_station_hangup(station_id: int, db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    if user.get("role") == "CONTROLLER":
+        controller_id = user.get("controller_id")
+        if not controller_id:
+            raise HTTPException(status_code=403, detail="Controller is not assigned")
+        row = (await db.execute(text("SELECT section_id FROM controllers WHERE id=:id AND enabled=TRUE"), {"id": controller_id})).first()
+        if row is None or row.section_id != station.section_id:
+            raise HTTPException(status_code=403, detail="Station is outside the controller's assigned section")
+    try:
+        result = await hangup_station_channel(station.sip_extension)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return result
 
 @app.get("/api/v1/station-management")
