@@ -130,18 +130,22 @@ async def direct_call(payload: dict = Body(...), db: AsyncSession = Depends(get_
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
+async def _authorize_controller_station(station: Station, user: dict, db: AsyncSession) -> None:
+    if user.get("role") != "CONTROLLER":
+        return
+    controller_id = user.get("controller_id")
+    if not controller_id:
+        raise HTTPException(status_code=403, detail="Controller is not assigned")
+    row = (await db.execute(text("SELECT section_id FROM controllers WHERE id=:id AND enabled=TRUE"), {"id": controller_id})).first()
+    if row is None or row.section_id != station.section_id:
+        raise HTTPException(status_code=403, detail="Station is outside the controller's assigned section")
+
 @app.post("/api/v1/calls/stations/{station_id}")
 async def controller_station_call(station_id: int, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
     station = await db.get(Station, station_id)
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
-    if user.get("role") == "CONTROLLER":
-        controller_id = user.get("controller_id")
-        if not controller_id:
-            raise HTTPException(status_code=403, detail="Controller is not assigned")
-        row = (await db.execute(text("SELECT section_id FROM controllers WHERE id=:id AND enabled=TRUE"), {"id": controller_id})).first()
-        if row is None or row.section_id != station.section_id:
-            raise HTTPException(status_code=403, detail="Station is outside the controller's assigned section")
+    await _authorize_controller_station(station, user, db)
     call_type = str(payload.get("call_type") or "DIRECT").strip().upper()
     if call_type not in {"DIRECT", "GENERAL", "SECTION", "GROUP"}:
         raise HTTPException(status_code=400, detail="Invalid call_type")
@@ -172,15 +176,33 @@ async def conference_station_hangup(station_id: int, db: AsyncSession = Depends(
     station = await db.get(Station, station_id)
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
-    if user.get("role") == "CONTROLLER":
-        controller_id = user.get("controller_id")
-        if not controller_id:
-            raise HTTPException(status_code=403, detail="Controller is not assigned")
-        row = (await db.execute(text("SELECT section_id FROM controllers WHERE id=:id AND enabled=TRUE"), {"id": controller_id})).first()
-        if row is None or row.section_id != station.section_id:
-            raise HTTPException(status_code=403, detail="Station is outside the controller's assigned section")
+    await _authorize_controller_station(station, user, db)
     try:
         result = await hangup_station_channel(station.sip_extension)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return result
+
+@app.post("/api/v1/conference/stations/{station_id}/mute")
+async def conference_station_mute(station_id: int, db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    await _authorize_controller_station(station, user, db)
+    try:
+        result = await mute_conference_channel(station.sip_extension, mute=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return result
+
+@app.post("/api/v1/conference/stations/{station_id}/unmute")
+async def conference_station_unmute(station_id: int, db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    station = await db.get(Station, station_id)
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    await _authorize_controller_station(station, user, db)
+    try:
+        result = await mute_conference_channel(station.sip_extension, mute=False)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return result
