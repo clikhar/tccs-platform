@@ -172,7 +172,7 @@ def _sync_remote(server: Dict[str, Any], files: Dict[str, str]) -> Dict[str, Any
     try:
         for path, content in files.items():
             encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-            cmd = f"mkdir -p /etc/asterisk && echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(path)} && chmod 0640 {shlex.quote(path)}"
+            cmd = f"mkdir -p /etc/asterisk && echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(path)} && chmod 0644 {shlex.quote(path)}"
             _root_command(channel, cmd, 30)
         include_script = '''import os,sys,shutil,datetime\nparent,managed,label=sys.argv[1:]\nmarker='; BEGIN TCCS MANAGED INCLUDE '+label.upper()\nend='; END TCCS MANAGED INCLUDE '+label.upper()\ndata=open(parent).read() if os.path.exists(parent) else ''\nstart=data.find(marker)\nif start>=0:\n finish=data.find(end,start)\n if finish>=0:\n  finish += len(end)\n  while finish < len(data) and data[finish] in '\\r\\n': finish += 1\n  data=data[:start]+data[finish:]\nblock=marker+'\\n#include '+managed+'\\n'+end+'\\n'\ndata=data.rstrip()+'\\n\\n'+block\nbackup=parent+'.tccs-backup-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')\nif os.path.exists(parent): shutil.copy2(parent,backup)\nopen(parent,'w').write(data)\nprint('UPDATED '+parent+' BACKUP '+backup)\n'''
         script64 = base64.b64encode(include_script.encode()).decode()
