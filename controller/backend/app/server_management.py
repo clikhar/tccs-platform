@@ -90,18 +90,23 @@ def _generate_pjsip(data: Dict[str, Any]) -> str:
         "; Generated at " + datetime.now(timezone.utc).isoformat(), "", "[transport-tccs]", "type=transport", "protocol=udp", "bind=0.0.0.0:5060", "",
         "[station-template](!)", "type=endpoint", "transport=transport-tccs", "context=tccs-stations", "disallow=all", "allow=alaw,ulaw", "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
         "[station-auth-template](!)", "type=auth", "auth_type=userpass", "", "[station-aor-template](!)", "type=aor", "max_contacts=1", "remove_existing=yes", "qualify_frequency=30", "",
-        "[controller-template](!)", "type=endpoint", "transport=transport-tccs", "context=tccs-controller", "disallow=all", "allow=alaw,ulaw", "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
+        "[controller-template](!)", "type=endpoint", "transport=transport-wss", "context=tccs-controller", "disallow=all", "allow=ulaw,alaw", "direct_media=no", "webrtc=yes", "dtls_auto_generate_cert=yes", "rtcp_mux=yes", "use_avpf=yes", "media_encryption=dtls", "ice_support=yes", "media_use_received_transport=yes", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
         "[controller-auth-template](!)", "type=auth", "auth_type=userpass", "", "[controller-aor-template](!)", "type=aor", "max_contacts=1", "remove_existing=yes", "qualify_frequency=30", "",
     ]
     for station in data["stations"]:
-        if not station["enabled"]: continue
+        if not station["enabled"]:
+            continue
         ext = _safe(station["sip_extension"])
         caller = f'{_safe(station["station_number"])} {_safe(station["name"])}'.strip()
         lines += [f"[{ext}](station-template)", f"aors={ext}", f"auth={ext}-auth", f'callerid="{caller}" <{ext}>', "", f"[{ext}-auth](station-auth-template)", f"username={ext}", f"password={ext}", "", f"[{ext}](station-aor-template)", ""]
     for controller in data["controllers"]:
-        if not controller["enabled"] or not controller.get("sip_extension") or not controller.get("sip_enabled", True): continue
-        ext = _safe(controller["sip_extension"]); username = _safe(controller.get("sip_username") or ext); password = _safe(controller.get("sip_password"))
-        if not password: continue
+        if not controller["enabled"] or not controller.get("sip_extension") or not controller.get("sip_enabled", True):
+            continue
+        ext = _safe(controller["sip_extension"])
+        username = _safe(controller.get("sip_username") or ext)
+        password = _safe(controller.get("sip_password"))
+        if not password:
+            continue
         lines += [f"; Controller: {_safe(controller['code'])} - {_safe(controller['name'])}", f"[{ext}](controller-template)", f"aors={ext}", f"auth={ext}-auth", f'callerid="{_safe(controller["name"])}" <{ext}>', "", f"[{ext}-auth](controller-auth-template)", f"username={username}", f"password={password}", "", f"[{ext}](controller-aor-template)", ""]
     return "\n".join(lines) + "\n"
 
@@ -114,7 +119,8 @@ def _generate_extensions(data: Dict[str, Any]) -> str:
         "exten => _10XX,1,NoOp(TCCS station call to ${EXTEN})", " same => n,Dial(PJSIP/${EXTEN},30)", " same => n,Hangup()", "",
     ]
     for controller in data["controllers"]:
-        if not controller["enabled"] or not controller.get("sip_extension"): continue
+        if not controller["enabled"] or not controller.get("sip_extension"):
+            continue
         ext = _safe(controller["sip_extension"])
         lines += [f"; Controller {_safe(controller['code'])}: {ext}", f"exten => {ext},1,NoOp(TCCS station ${{CALLERID(num)}} calling controller {ext})", " same => n,Dial(PJSIP/" + ext + ",30)", " same => n,Hangup()", ""]
     lines += [
@@ -151,7 +157,8 @@ def _wait_shell(channel: paramiko.Channel, patterns: tuple[str, ...], timeout: f
         if channel.recv_ready():
             data += channel.recv(65535).decode("utf-8", "replace")
             low = data.lower()
-            if any(p.lower() in low for p in patterns): return data
+            if any(p.lower() in low for p in patterns):
+                return data
         else:
             time.sleep(0.1)
     raise RuntimeError("Timed out waiting for remote shell prompt")
@@ -230,21 +237,13 @@ async def list_servers(db: AsyncSession = Depends(get_db), admin: dict = Depends
 @router.post("")
 async def create_server(payload: dict = Body(...), db: AsyncSession = Depends(get_db), admin: dict = Depends(require_admin)):
     await ensure_server_schema(db)
-    name = _safe(payload.get("name"))
-    role = _safe(payload.get("role") or "PRIMARY").upper()
-    ip = _safe(payload.get("ip_address"))
-    username = _safe(payload.get("ssh_username") or "root")
-    password = _safe(payload.get("ssh_password"))
-    port = int(payload.get("ssh_port") or 22)
-    if not name or not ip or not password:
-        raise HTTPException(400, "name, ip_address and ssh_password are required")
+    name = _safe(payload.get("name")); role = _safe(payload.get("role") or "PRIMARY").upper(); ip = _safe(payload.get("ip_address")); username = _safe(payload.get("ssh_username") or "root"); password = _safe(payload.get("ssh_password")); port = int(payload.get("ssh_port") or 22)
+    if not name or not ip or not password: raise HTTPException(400, "name, ip_address and ssh_password are required")
     try:
         result = await db.execute(text("INSERT INTO asterisk_servers (name,role,ip_address,ssh_username,ssh_password_encrypted,ssh_port) VALUES (:name,:role,:ip,:username,:password,:port) RETURNING id"), {"name":name,"role":role,"ip":ip,"username":username,"password":_encrypt(password),"port":port})
-        await db.commit()
-        return {"id": result.scalar_one(), "status":"CREATED"}
+        await db.commit(); return {"id": result.scalar_one(), "status":"CREATED"}
     except Exception:
-        await db.rollback()
-        raise HTTPException(400, "Unable to create Asterisk server; check for duplicate IP or invalid data")
+        await db.rollback(); raise HTTPException(400, "Unable to create Asterisk server; check for duplicate IP or invalid data")
 
 
 @router.put("/{server_id}")
@@ -254,10 +253,8 @@ async def update_server(server_id: int, payload: dict = Body(...), db: AsyncSess
     if not row: raise HTTPException(404, "Asterisk server not found")
     fields=[]; params={"id":server_id}
     for key, column in (("name","name"),("role","role"),("ip_address","ip_address"),("ssh_username","ssh_username"),("ssh_port","ssh_port"),("enabled","enabled")):
-        if key in payload:
-            fields.append(f"{column}=:{key}"); params[key]=payload[key]
-    if payload.get("ssh_password"):
-        fields.append("ssh_password_encrypted=:password"); params["password"]=_encrypt(_safe(payload["ssh_password"]))
+        if key in payload: fields.append(f"{column}=:{key}"); params[key]=payload[key]
+    if payload.get("ssh_password"): fields.append("ssh_password_encrypted=:password"); params["password"]=_encrypt(_safe(payload["ssh_password"]))
     if not fields: return {"status":"UNCHANGED"}
     fields.append("updated_at=NOW()")
     try:
@@ -302,8 +299,7 @@ async def sync_server(server_id: int, db: AsyncSession = Depends(get_db), admin:
     except Exception as exc:
         await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status='FAILED',last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server_id,"message":str(exc)}); await db.commit()
         raise HTTPException(502, f"Asterisk server sync failed: {exc}") from exc
-    await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status=:status,last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server_id,"status":result.get("status","SYNCED"),"message":result.get("message","")}); await db.commit()
-    return result
+    await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status=:status,last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server_id,"status":result.get("status","SYNCED"),"message":result.get("message","")}); await db.commit(); return result
 
 
 @router.post("/sync-all")
@@ -314,8 +310,7 @@ async def sync_all(db: AsyncSession = Depends(get_db), admin: dict = Depends(req
     results=[]
     for server in rows:
         try:
-            result=await _run_sync(dict(server),files)
-            status=result.get("status","SYNCED"); message=result.get("message","")
+            result=await _run_sync(dict(server),files); status=result.get("status","SYNCED"); message=result.get("message","")
         except Exception as exc:
             status="FAILED"; message=str(exc)
         await db.execute(text("UPDATE asterisk_servers SET last_sync_at=NOW(),last_sync_status=:status,last_sync_message=:message,updated_at=NOW() WHERE id=:id"), {"id":server["id"],"status":status,"message":message})
