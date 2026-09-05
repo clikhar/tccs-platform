@@ -90,6 +90,8 @@ def _generate_pjsip(data: Dict[str, Any]) -> str:
         "; Generated at " + datetime.now(timezone.utc).isoformat(), "", "[transport-tccs]", "type=transport", "protocol=udp", "bind=0.0.0.0:5060", "",
         "[station-template](!)", "type=endpoint", "transport=transport-tccs", "context=tccs-stations", "disallow=all", "allow=alaw,ulaw", "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
         "[station-auth-template](!)", "type=auth", "auth_type=userpass", "", "[station-aor-template](!)", "type=aor", "max_contacts=1", "remove_existing=yes", "qualify_frequency=30", "",
+        "[controller-template](!)", "type=endpoint", "transport=transport-tccs", "context=tccs-controller", "disallow=all", "allow=alaw,ulaw", "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
+        "[controller-auth-template](!)", "type=auth", "auth_type=userpass", "", "[controller-aor-template](!)", "type=aor", "max_contacts=1", "remove_existing=yes", "qualify_frequency=30", "",
     ]
     for station in data["stations"]:
         if not station["enabled"]: continue
@@ -100,7 +102,7 @@ def _generate_pjsip(data: Dict[str, Any]) -> str:
         if not controller["enabled"] or not controller.get("sip_extension") or not controller.get("sip_enabled", True): continue
         ext = _safe(controller["sip_extension"]); username = _safe(controller.get("sip_username") or ext); password = _safe(controller.get("sip_password"))
         if not password: continue
-        lines += [f"; Controller: {_safe(controller['code'])} - {_safe(controller['name'])}", f"[{ext}](station-template)", f"aors={ext}", f"auth={ext}-auth", f'callerid="{_safe(controller["name"])}" <{ext}>', "", f"[{ext}-auth](station-auth-template)", f"username={username}", f"password={password}", "", f"[{ext}](station-aor-template)", ""]
+        lines += [f"; Controller: {_safe(controller['code'])} - {_safe(controller['name'])}", f"[{ext}](controller-template)", f"aors={ext}", f"auth={ext}-auth", f'callerid="{_safe(controller["name"])}" <{ext}>', "", f"[{ext}-auth](controller-auth-template)", f"username={username}", f"password={password}", "", f"[{ext}](controller-aor-template)", ""]
     return "\n".join(lines) + "\n"
 
 
@@ -110,14 +112,18 @@ def _generate_extensions(data: Dict[str, Any]) -> str:
         "; Generated at " + datetime.now(timezone.utc).isoformat(), "", "[tccs-stations]",
         "exten => 900,1,NoOp(TCCS station joining ${TCCS_CONFERENCE})", " same => n,Answer()", " same => n,ExecIf($[\"${TCCS_CONFERENCE}\"=\"\"]?Hangup())", " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_station)", " same => n,Hangup()", "",
         "exten => _10XX,1,NoOp(TCCS station call to ${EXTEN})", " same => n,Dial(PJSIP/${EXTEN},30)", " same => n,Hangup()", "",
+        "[tccs-controller]",
+        "exten => 900,1,NoOp(TCCS controller ${CALLERID(num)} joining its controller conference)",
+        " same => n,Answer()",
+        " same => n,Set(TCCS_CONFERENCE=TCCS-CTRL-${CALLERID(num)})",
+        " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_controller)",
+        " same => n,Hangup()", "",
     ]
     for controller in data["controllers"]:
         if not controller["enabled"] or not controller.get("sip_extension"): continue
         ext = _safe(controller["sip_extension"])
-        lines += [f"; Controller {_safe(controller['code'])}: {ext}", f"exten => {ext},1,NoOp(TCCS station ${{CALLERID(num)}} joining controller {ext})", " same => n,Answer()", f" same => n,Set(TCCS_CONFERENCE=TCCS-CTRL-{ext})", " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_station)", " same => n,Hangup()", ""]
-    if not any(_safe(c.get("sip_extension")) == "9999" for c in data["controllers"]):
-        lines += ["; Default Stage 2 browser controller conference entry", "exten => 9999,1,NoOp(TCCS browser controller joining SECTION01)", " same => n,Answer()", " same => n,ConfBridge(SECTION01,tccs_bridge,tccs_controller)", " same => n,Hangup()", ""]
-    lines += ["; Direct station-to-controller dialing", "exten => _9XXX,1,NoOp(TCCS station ${CALLERID(num)} joining controller ${EXTEN})", " same => n,Answer()", " same => n,Set(TCCS_CONFERENCE=TCCS-CTRL-${EXTEN})", " same => n,ConfBridge(${TCCS_CONFERENCE},tccs_bridge,tccs_station)", " same => n,Hangup()", ""]
+        lines += [f"; Controller {_safe(controller['code'])}: {ext}", f"exten => {ext},1,NoOp(TCCS station ${{CALLERID(num)}} calling controller {ext})", " same => n,Dial(PJSIP/" + ext + ",30)", " same => n,Hangup()", ""]
+    lines += ["; Direct station-to-controller dialing", "exten => _9XXX,1,NoOp(TCCS station ${CALLERID(num)} calling controller ${EXTEN})", " same => n,Dial(PJSIP/${EXTEN},30)", " same => n,Hangup()", ""]
     return "\n".join(lines)
 
 
