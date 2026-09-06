@@ -1,19 +1,50 @@
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .adapters.asterisk_event_processor import AsteriskEventProcessor
+from .adapters.asterisk_events import AsteriskEventStream
 from .config import settings
 from .db import check_database, close_database, get_db_session
 from .models import CallRequest, CallStatus, ConferenceCallRequest, ParticipantActionRequest, ParticipantStatus
 from .services.call_service import CallService
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
+_asterisk_event_stream: AsteriskEventStream | None = None
+_asterisk_event_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    global _asterisk_event_stream, _asterisk_event_task
+    if not settings.asterisk_ari_enabled:
+        return
+    _asterisk_event_stream = AsteriskEventStream(
+        base_url=settings.asterisk_ari_url,
+        username=settings.asterisk_ari_username,
+        password=settings.asterisk_ari_password,
+        app=settings.asterisk_ari_app,
+        handler=AsteriskEventProcessor(),
+        reconnect_delay=settings.asterisk_ari_reconnect_delay,
+    )
+    _asterisk_event_task = asyncio.create_task(_asterisk_event_stream.run_forever())
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    global _asterisk_event_stream, _asterisk_event_task
+    if _asterisk_event_stream is not None:
+        await _asterisk_event_stream.stop()
+    if _asterisk_event_task is not None:
+        try:
+            await asyncio.wait_for(_asterisk_event_task, timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _asterisk_event_task.cancel()
+    _asterisk_event_stream = None
+    _asterisk_event_task = None
     await close_database()
 
 
