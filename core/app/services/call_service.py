@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..adapters.asterisk_events import AsteriskEvent
 from ..db_models import Call, CallEvent, CallParticipant, CallState
 from ..models import CallRequest, CallStatus
 from ..repositories.calls import CallRepository
@@ -129,6 +130,49 @@ class CallService:
             participant.disconnected_at = datetime.now(timezone.utc)
             self._add_event_by_id(call_id, "participant.disconnected", actor or extension, {"extension": extension})
 
+    async def handle_asterisk_event(self, event: AsteriskEvent) -> bool:
+        """Apply an ARI channel event to persistent TCCS call state.
+
+        Returns True when the event was correlated to a persisted participant.
+        """
+        if not event.channel_id:
+            return False
+
+        async with self.session.begin():
+            if event.event_type == "StasisStart":
+                return await self._handle_stasis_start(event)
+
+            participant = await self._participant_by_channel(event.channel_id)
+            if participant is None:
+                return False
+
+            call = await self.calls.get(participant.call_id)
+            if call is None:
+                return False
+
+            if event.event_type == "ChannelStateChange":
+                state = str((event.payload.get("channel") or {}).get("state", "")).lower()
+                if state in {"ring", "ringing"}:
+                    call.state = CallState.RINGING.value
+                    self._add_event_by_id(call.id, "asterisk.channel.ringing", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
+                elif state in {"up", "connected"}:
+                    participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
+                    call.state = CallState.CONNECTED.value
+                    self._add_event_by_id(call.id, "asterisk.channel.connected", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
+                return True
+
+            if event.event_type == "StasisEnd":
+                participant.disconnected_at = participant.disconnected_at or datetime.now(timezone.utc)
+                participant.asterisk_channel_id = None
+                active = await self._active_participants(call.id)
+                if not active:
+                    call.state = CallState.ENDED.value
+                    call.ended_at = datetime.now(timezone.utc)
+                self._add_event_by_id(call.id, "asterisk.channel.ended", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
+                return True
+
+            return False
+
     async def get(self, call_id: UUID) -> CallStatus | None:
         call = await self.calls.get(call_id)
         return self._status(call) if call else None
@@ -138,6 +182,53 @@ class CallService:
             select(CallParticipant)
             .where(CallParticipant.call_id == call_id)
             .order_by(CallParticipant.extension)
+        )
+        return list(result.scalars())
+
+    async def _handle_stasis_start(self, event: AsteriskEvent) -> bool:
+        args = event.payload.get("args") or []
+        if len(args) < 3 or args[0] != "outbound":
+            return False
+
+        source, target = str(args[1]), str(args[2])
+        result = await self.session.execute(
+            select(Call)
+            .where(
+                Call.source_extension == source,
+                Call.target == target,
+                Call.state.in_([CallState.INITIATED.value, CallState.RINGING.value]),
+            )
+            .order_by(Call.started_at.desc())
+            .limit(1)
+        )
+        call = result.scalar_one_or_none()
+        if call is None:
+            return False
+
+        participant = await self._participant(call.id, target)
+        participant.asterisk_channel_id = event.channel_id
+        call.state = CallState.RINGING.value
+        self._add_event_by_id(
+            call.id,
+            "asterisk.channel.started",
+            event.channel_name or event.channel_id,
+            {"channel_id": event.channel_id, "source": source, "target": target},
+        )
+        return True
+
+    async def _participant_by_channel(self, channel_id: str) -> CallParticipant | None:
+        result = await self.session.execute(
+            select(CallParticipant).where(CallParticipant.asterisk_channel_id == channel_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def _active_participants(self, call_id: UUID) -> list[CallParticipant]:
+        result = await self.session.execute(
+            select(CallParticipant).where(
+                CallParticipant.call_id == call_id,
+                CallParticipant.disconnected_at.is_(None),
+                CallParticipant.asterisk_channel_id.is_not(None),
+            )
         )
         return list(result.scalars())
 
