@@ -55,7 +55,7 @@ def test_primary_keys_are_uuid_columns() -> None:
         AuditLog,
     ):
         value = model.id.default.arg
-        assert isinstance(value(), uuid.UUID)
+        assert isinstance(value(None), uuid.UUID)
 
 
 def test_endpoint_identity_is_distinct_from_extension_number() -> None:
