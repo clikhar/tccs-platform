@@ -26,7 +26,7 @@ async def session():
 
 
 @pytest.mark.asyncio
-async def test_initiate_persists_call_event_and_controller(session: AsyncSession) -> None:
+async def test_initiate_persists_call_event_and_participants(session: AsyncSession) -> None:
     service = CallService(session)
     request = CallRequest(source="1001", target="2001", section_id="SEC-1")
 
@@ -48,7 +48,10 @@ async def test_initiate_persists_call_event_and_controller(session: AsyncSession
     assert json.loads(event.payload)["section_id"] == "SEC-1"
 
     participants = await service.participants(call_id)
-    assert [(p.extension, p.role, p.muted) for p in participants] == [("1001", "controller", False)]
+    assert [(p.extension, p.role, p.muted) for p in participants] == [
+        ("1001", "controller", False),
+        ("2001", "participant", False),
+    ]
     await session.rollback()
 
 
