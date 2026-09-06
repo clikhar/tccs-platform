@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -117,7 +117,10 @@ class Call(Base):
 
 class CallParticipant(Base):
     __tablename__ = "call_participants"
-    __table_args__ = (UniqueConstraint("call_id", "extension", name="uq_call_participant"),)
+    __table_args__ = (
+        UniqueConstraint("call_id", "extension", name="uq_call_participant"),
+        Index("ix_call_participants_asterisk_channel_id", "asterisk_channel_id", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     call_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
@@ -126,6 +129,7 @@ class CallParticipant(Base):
     muted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    asterisk_channel_id: Mapped[str | None] = mapped_column(String(128))
 
     call: Mapped["Call"] = relationship(back_populates="participants")
 
