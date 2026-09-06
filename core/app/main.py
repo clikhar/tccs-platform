@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
-from .db import check_database, close_database
-from .models import CallRequest, CallState, CallStatus
+from .db import check_database, close_database, get_db_session
+from .models import CallRequest, CallStatus
+from .services.call_service import CallService
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 
@@ -44,18 +46,26 @@ async def system_status() -> dict[str, str]:
 
 
 @app.post("/api/v1/calls", response_model=CallStatus)
-async def create_call(request: CallRequest) -> CallStatus:
+async def create_call(
+    request: CallRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> CallStatus:
     if not request.source or not request.target:
         raise HTTPException(status_code=400, detail="source and target are required")
-
-    return CallStatus(
-        call_id=str(uuid4()),
-        state=CallState.INITIATED,
-        source=request.source,
-        target=request.target,
-    )
+    return await CallService(session).initiate(request)
 
 
 @app.get("/api/v1/calls/{call_id}", response_model=CallStatus)
-async def get_call(call_id: str) -> CallStatus:
-    raise HTTPException(status_code=404, detail=f"call {call_id} not found")
+async def get_call(
+    call_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> CallStatus:
+    try:
+        call_uuid = UUID(call_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid call_id") from exc
+
+    call = await CallService(session).get(call_uuid)
+    if call is None:
+        raise HTTPException(status_code=404, detail=f"call {call_id} not found")
+    return call
