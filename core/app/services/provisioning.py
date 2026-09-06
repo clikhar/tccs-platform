@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from ipaddress import ip_address
 
 from ..db_models import Endpoint
 
@@ -44,7 +43,7 @@ def render_pjsip_endpoint(config: PjsipEndpointConfig) -> str:
             "type=endpoint",
             f"transport={config.transport}",
             f"auth={config.identity}-auth",
-            f"aors={config.identity}",
+            f"aors={config.identity}-aor",
             "context=tccs-endpoints",
             "direct_media=no",
             "disallow=all",
