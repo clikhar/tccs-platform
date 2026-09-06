@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import websockets
@@ -45,7 +45,8 @@ class AsteriskEventStream:
     def _build_url(base_url: str, username: str, password: str, app: str) -> str:
         parsed = urlsplit(base_url.rstrip("/"))
         scheme = "wss" if parsed.scheme == "https" else "ws"
-        path = f"{parsed.path.rstrip('/')}/ari/events"
+        base_path = parsed.path.rstrip("/")
+        path = f"{base_path}/events" if base_path.endswith("/ari") else f"{base_path}/ari/events"
         query = urlencode({"api_key": f"{username}:{password}", "app": app})
         return urlunsplit((scheme, parsed.netloc, path, query, ""))
 
