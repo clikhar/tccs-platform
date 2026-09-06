@@ -18,5 +18,12 @@ class CallRepository:
         return call
 
     async def get(self, call_id: UUID) -> Call | None:
-        result = await self.session.execute(select(Call).where(Call.id == call_id))
+        # Calls can remain present in the AsyncSession identity map with
+        # expire_on_commit=False. Force this lookup to refresh an existing
+        # instance so callers observe state committed by an earlier event.
+        result = await self.session.execute(
+            select(Call)
+            .execution_options(populate_existing=True)
+            .where(Call.id == call_id)
+        )
         return result.scalar_one_or_none()
