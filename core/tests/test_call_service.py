@@ -2,8 +2,8 @@ import json
 import uuid
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from app.db import Base
 from app.db_models import CallEvent
@@ -13,16 +13,14 @@ from app.services.call_service import CallService
 
 @pytest.fixture
 async def session():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = create_async_engine("postgresql+asyncpg://tccs:tccs@localhost:5432/tccs")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as db:
         yield db
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 
 
@@ -42,7 +40,7 @@ async def test_initiate_persists_call_and_event(session: AsyncSession) -> None:
     assert loaded == status
 
     events = await session.execute(
-        __import__("sqlalchemy").select(CallEvent).where(CallEvent.call_id == uuid.UUID(status.call_id))
+        select(CallEvent).where(CallEvent.call_id == uuid.UUID(status.call_id))
     )
     event = events.scalar_one()
     assert event.event_type == "call.initiated"
