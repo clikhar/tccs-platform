@@ -50,3 +50,6 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+      - name: Build Core container
+        run: docker build -t tccs-core:ci .
