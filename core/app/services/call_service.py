@@ -139,21 +139,21 @@ class CallService:
             self._add_event_by_id(call_id, "participant.disconnected", actor or extension, {"extension": extension})
 
     async def handle_asterisk_event(self, event: AsteriskEvent) -> bool:
-        """Apply an ARI channel event to persistent TCCS call state.
+        """Apply an ARI channel event as an atomic persistence operation.
 
-        The method participates in an existing session transaction when the
-        caller already has one; otherwise it owns and commits its transaction.
-        This avoids attempting a second outer transaction after a caller has
-        performed a read (SQLAlchemy sessions use autobegin for such reads).
+        Asterisk events are external inputs and therefore form their own
+        persistence boundary. A read performed by a caller can leave an
+        AsyncSession in an implicit transaction; committing here guarantees
+        that the event transition is not accidentally rolled back with that
+        unrelated read transaction.
         """
         if not event.channel_id:
             return False
 
-        if self.session.in_transaction():
-            return await self._handle_asterisk_event_in_transaction(event)
-
-        async with self.session.begin():
-            return await self._handle_asterisk_event_in_transaction(event)
+        handled = await self._handle_asterisk_event_in_transaction(event)
+        if handled:
+            await self.session.commit()
+        return handled
 
     async def _handle_asterisk_event_in_transaction(self, event: AsteriskEvent) -> bool:
         if event.event_type == "StasisStart":
