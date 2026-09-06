@@ -141,45 +141,69 @@ class CallService:
     async def handle_asterisk_event(self, event: AsteriskEvent) -> bool:
         """Apply an ARI channel event to persistent TCCS call state.
 
-        Returns True when the event was correlated to a persisted participant.
+        The method participates in an existing session transaction when the
+        caller already has one; otherwise it owns and commits its transaction.
+        This avoids attempting a second outer transaction after a caller has
+        performed a read (SQLAlchemy sessions use autobegin for such reads).
         """
         if not event.channel_id:
             return False
 
+        if self.session.in_transaction():
+            return await self._handle_asterisk_event_in_transaction(event)
+
         async with self.session.begin():
-            if event.event_type == "StasisStart":
-                return await self._handle_stasis_start(event)
+            return await self._handle_asterisk_event_in_transaction(event)
 
-            participant = await self._participant_by_channel(event.channel_id)
-            if participant is None:
-                return False
+    async def _handle_asterisk_event_in_transaction(self, event: AsteriskEvent) -> bool:
+        if event.event_type == "StasisStart":
+            return await self._handle_stasis_start(event)
 
-            call = await self.calls.get(participant.call_id)
-            if call is None:
-                return False
-
-            if event.event_type == "ChannelStateChange":
-                state = str((event.payload.get("channel") or {}).get("state", "")).lower()
-                if state in {"ring", "ringing"}:
-                    call.state = CallState.RINGING.value
-                    self._add_event_by_id(call.id, "asterisk.channel.ringing", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
-                elif state in {"up", "connected"}:
-                    participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
-                    call.state = CallState.CONNECTED.value
-                    self._add_event_by_id(call.id, "asterisk.channel.connected", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
-                return True
-
-            if event.event_type == "StasisEnd":
-                participant.disconnected_at = participant.disconnected_at or datetime.now(timezone.utc)
-                participant.asterisk_channel_id = None
-                active = await self._active_participants(call.id)
-                if not active:
-                    call.state = CallState.ENDED.value
-                    call.ended_at = datetime.now(timezone.utc)
-                self._add_event_by_id(call.id, "asterisk.channel.ended", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
-                return True
-
+        participant = await self._participant_by_channel(event.channel_id)
+        if participant is None:
             return False
+
+        call = await self.calls.get(participant.call_id)
+        if call is None:
+            return False
+
+        if event.event_type == "ChannelStateChange":
+            state = str((event.payload.get("channel") or {}).get("state", "")).lower()
+            if state in {"ring", "ringing"}:
+                call.state = CallState.RINGING.value
+                self._add_event_by_id(
+                    call.id,
+                    "asterisk.channel.ringing",
+                    event.channel_name or event.channel_id,
+                    {"channel_id": event.channel_id},
+                )
+            elif state in {"up", "connected"}:
+                participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
+                call.state = CallState.CONNECTED.value
+                self._add_event_by_id(
+                    call.id,
+                    "asterisk.channel.connected",
+                    event.channel_name or event.channel_id,
+                    {"channel_id": event.channel_id},
+                )
+            return True
+
+        if event.event_type == "StasisEnd":
+            participant.disconnected_at = participant.disconnected_at or datetime.now(timezone.utc)
+            participant.asterisk_channel_id = None
+            active = await self._active_participants(call.id)
+            if not active:
+                call.state = CallState.ENDED.value
+                call.ended_at = datetime.now(timezone.utc)
+            self._add_event_by_id(
+                call.id,
+                "asterisk.channel.ended",
+                event.channel_name or event.channel_id,
+                {"channel_id": event.channel_id},
+            )
+            return True
+
+        return False
 
     async def get(self, call_id: UUID) -> CallStatus | None:
         call = await self.calls.get(call_id)
