@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.db_models import CallEvent
+from app.db_models import CallEvent, CallParticipant
 from app.models import CallRequest, CallState
 from app.services.call_service import CallService
 
@@ -25,24 +25,69 @@ async def session():
 
 
 @pytest.mark.asyncio
-async def test_initiate_persists_call_and_event(session: AsyncSession) -> None:
+async def test_initiate_persists_call_event_and_controller(session: AsyncSession) -> None:
     service = CallService(session)
     request = CallRequest(source="1001", target="2001", section_id="SEC-1")
 
     status = await service.initiate(request)
 
-    assert uuid.UUID(status.call_id)
+    call_id = uuid.UUID(status.call_id)
     assert status.state == CallState.INITIATED
     assert status.source == "1001"
     assert status.target == "2001"
 
-    loaded = await service.get(uuid.UUID(status.call_id))
+    loaded = await service.get(call_id)
     assert loaded == status
 
-    events = await session.execute(
-        select(CallEvent).where(CallEvent.call_id == uuid.UUID(status.call_id))
-    )
+    events = await session.execute(select(CallEvent).where(CallEvent.call_id == call_id))
     event = events.scalar_one()
     assert event.event_type == "call.initiated"
     assert event.actor == "1001"
     assert json.loads(event.payload)["section_id"] == "SEC-1"
+
+    participants = await service.participants(call_id)
+    assert [(p.extension, p.role, p.muted) for p in participants] == [("1001", "controller", False)]
+
+
+@pytest.mark.asyncio
+async def test_conference_persists_muted_participants_and_state(session: AsyncSession) -> None:
+    service = CallService(session)
+
+    status = await service.initiate_conference(
+        source="1001",
+        targets=["2001", "2002", "2001"],
+        mode="general",
+        conference_id="SEC-01-GENERAL",
+    )
+
+    call_id = uuid.UUID(status.call_id)
+    assert status.state == CallState.CONFERENCE
+    assert status.conference_id == "SEC-01-GENERAL"
+    assert status.target == "2001,2002"
+
+    participants = await service.participants(call_id)
+    assert [(p.extension, p.role, p.muted) for p in participants] == [
+        ("1001", "controller", False),
+        ("2001", "participant", True),
+        ("2002", "participant", True),
+    ]
+
+    await service.unmute_participant(call_id, "2001", actor="1001")
+    await service.connect_participant(call_id, "2001", actor="2001")
+    await service.remove_participant(call_id, "2002", actor="1001")
+
+    participants = await service.participants(call_id)
+    by_extension = {p.extension: p for p in participants}
+    assert by_extension["2001"].muted is False
+    assert by_extension["2001"].connected_at is not None
+    assert by_extension["2002"].disconnected_at is not None
+
+    events = await session.execute(
+        select(CallEvent).where(CallEvent.call_id == call_id).order_by(CallEvent.occurred_at)
+    )
+    assert [event.event_type for event in events.scalars()] == [
+        "conference.created",
+        "participant.unmuted",
+        "participant.connected",
+        "participant.disconnected",
+    ]
