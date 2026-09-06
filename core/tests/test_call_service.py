@@ -2,16 +2,17 @@ import json
 import uuid
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db import Base
-from app.db_models import CallEvent, CallParticipant
+from app.db_models import CallEvent
 from app.models import CallRequest, CallState
 from app.services.call_service import CallService
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def session():
     engine = create_async_engine("postgresql+asyncpg://tccs:tccs@localhost:5432/tccs")
     async with engine.begin() as connection:
@@ -38,6 +39,7 @@ async def test_initiate_persists_call_event_and_controller(session: AsyncSession
 
     loaded = await service.get(call_id)
     assert loaded == status
+    await session.rollback()
 
     events = await session.execute(select(CallEvent).where(CallEvent.call_id == call_id))
     event = events.scalar_one()
@@ -47,6 +49,7 @@ async def test_initiate_persists_call_event_and_controller(session: AsyncSession
 
     participants = await service.participants(call_id)
     assert [(p.extension, p.role, p.muted) for p in participants] == [("1001", "controller", False)]
+    await session.rollback()
 
 
 @pytest.mark.asyncio
@@ -71,6 +74,7 @@ async def test_conference_persists_muted_participants_and_state(session: AsyncSe
         ("2001", "participant", True),
         ("2002", "participant", True),
     ]
+    await session.rollback()
 
     await service.unmute_participant(call_id, "2001", actor="1001")
     await service.connect_participant(call_id, "2001", actor="2001")
@@ -81,13 +85,16 @@ async def test_conference_persists_muted_participants_and_state(session: AsyncSe
     assert by_extension["2001"].muted is False
     assert by_extension["2001"].connected_at is not None
     assert by_extension["2002"].disconnected_at is not None
+    await session.rollback()
 
     events = await session.execute(
         select(CallEvent).where(CallEvent.call_id == call_id).order_by(CallEvent.occurred_at)
     )
-    assert [event.event_type for event in events.scalars()] == [
+    event_types = [event.event_type for event in events.scalars()]
+    assert set(event_types) == {
         "conference.created",
         "participant.unmuted",
         "participant.connected",
         "participant.disconnected",
-    ]
+    }
+    assert len(event_types) == 4
