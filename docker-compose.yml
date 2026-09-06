@@ -4,19 +4,75 @@ services:
     container_name: tccs-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: tccs
-      POSTGRES_USER: tccs
-      POSTGRES_PASSWORD: change-me-local
+      POSTGRES_DB: ${POSTGRES_DB:-tccs}
+      POSTGRES_USER: ${POSTGRES_USER:-tccs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local}
     ports:
       - "5432:5432"
     volumes:
       - tccs-postgres-data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tccs -d tccs"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  core-db-init:
+    image: postgres:16
+    container_name: tccs-core-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-tccs}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-local}
+      PGDATABASE: ${POSTGRES_DB:-tccs}
+      TCCS_CORE_DB: ${TCCS_CORE_DB:-tccs_core}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if psql -tAc "SELECT 1 FROM pg_database WHERE datname = '$$TCCS_CORE_DB'" | grep -q 1; then
+          echo "Database $$TCCS_CORE_DB already exists"
+        else
+          createdb "$$TCCS_CORE_DB"
+          echo "Created database $$TCCS_CORE_DB"
+        fi
+
+  core:
+    build:
+      context: ./core
+    container_name: tccs-core
+    restart: unless-stopped
+    depends_on:
+      core-db-init:
+        condition: service_completed_successfully
+    environment:
+      TCCS_ENVIRONMENT: ${TCCS_ENVIRONMENT:-production}
+      TCCS_DATABASE_URL: ${TCCS_DATABASE_URL:-postgresql+asyncpg://tccs:change-me-local@postgres:5432/tccs_core}
+      TCCS_ASTERISK_ARI_ENABLED: ${TCCS_ASTERISK_ARI_ENABLED:-false}
+      TCCS_ASTERISK_ARI_URL: ${TCCS_ASTERISK_ARI_URL:-http://host.docker.internal:8088/ari}
+      TCCS_ASTERISK_ARI_USERNAME: ${TCCS_ASTERISK_ARI_USERNAME:-tccs}
+      TCCS_ASTERISK_ARI_PASSWORD: ${TCCS_ASTERISK_ARI_PASSWORD:-}
+      TCCS_ASTERISK_ARI_APP: ${TCCS_ASTERISK_ARI_APP:-tccs-core}
+      TCCS_ASTERISK_ARI_TIMEOUT_SECONDS: ${TCCS_ASTERISK_ARI_TIMEOUT_SECONDS:-10}
+      TCCS_ASTERISK_ARI_RECONNECT_DELAY: ${TCCS_ASTERISK_ARI_RECONNECT_DELAY:-2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 volumes:
   tccs-postgres-data:
