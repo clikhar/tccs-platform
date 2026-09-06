@@ -1,0 +1,12 @@
+; TCCS ARI credentials template.
+; Copy to /etc/asterisk/ari.conf on the Asterisk host and set a site-specific password.
+; Do NOT commit production credentials to Git.
+
+[general]
+enabled = yes
+pretty = yes
+
+[tccs]
+type = user
+read_only = no
+password = CHANGE_ME
