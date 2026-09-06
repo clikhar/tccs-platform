@@ -48,9 +48,27 @@ class CallRequest(BaseModel):
     mode: str = "individual"
 
 
+class ConferenceCallRequest(BaseModel):
+    source: str = Field(min_length=2, max_length=8)
+    targets: list[str] = Field(min_length=1, max_length=100)
+    section_id: Optional[str] = None
+
+
+class ParticipantActionRequest(BaseModel):
+    actor: str = Field(min_length=2, max_length=8)
+
+
 class CallStatus(BaseModel):
     call_id: str
     state: CallState
     source: Optional[str] = None
     target: Optional[str] = None
     conference_id: Optional[str] = None
+
+
+class ParticipantStatus(BaseModel):
+    call_id: str
+    extension: str
+    role: str
+    muted: bool
+    connected: bool
