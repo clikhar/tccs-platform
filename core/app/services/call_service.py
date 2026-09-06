@@ -36,6 +36,14 @@ class CallService:
                     connected_at=datetime.now(timezone.utc),
                 )
             )
+            self.session.add(
+                CallParticipant(
+                    call_id=call.id,
+                    extension=request.target,
+                    role="participant",
+                    muted=False,
+                )
+            )
             self._add_event(
                 call,
                 "call.initiated",
