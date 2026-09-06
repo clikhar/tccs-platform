@@ -7,8 +7,7 @@ WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir alembic>=1.13,<2.0
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY pyproject.toml alembic.ini ./
 COPY app ./app
