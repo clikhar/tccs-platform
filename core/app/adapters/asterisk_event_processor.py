@@ -24,6 +24,7 @@ class AsteriskEventProcessor:
                 status = await service.get(call_id)
                 if status is None or status.source is None:
                     return
+                await session.rollback()
                 await service.mark_asterisk_leg(call_id, status.source, event.channel_id, connected=True)
                 await self.asterisk.originate_participant(call_id, status.target or str(args[2]))
                 return
@@ -33,6 +34,7 @@ class AsteriskEventProcessor:
                 status = await service.get(call_id)
                 if status is None or status.target is None:
                     return
+                await session.rollback()
                 await service.mark_asterisk_leg(call_id, status.target, event.channel_id, connected=True)
                 await self.asterisk.bridge_call(call_id)
                 return
