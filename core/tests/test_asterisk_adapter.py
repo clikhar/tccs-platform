@@ -1,17 +1,20 @@
-import pytest
 import httpx
+import pytest
 
 from app.adapters.asterisk import AsteriskAdapterError, AsteriskHttpClient
 
 
 @pytest.mark.asyncio
-async def test_asterisk_adapter_maps_ari_channel_and_participant() -> None:
+async def test_asterisk_adapter_maps_call_legs_and_bridge() -> None:
     requests: list[httpx.Request] = []
+    ids = iter(["source-channel", "target-channel"])
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "POST" and request.url.path == "/ari/channels":
-            return httpx.Response(200, json={"id": "ari-channel-1"})
+            return httpx.Response(200, json={"id": next(ids)})
+        if request.method == "POST" and request.url.path == "/ari/bridges":
+            return httpx.Response(200, json={"id": "bridge-1"})
         return httpx.Response(204)
 
     transport = httpx.MockTransport(handler)
@@ -24,31 +27,25 @@ async def test_asterisk_adapter_maps_ari_channel_and_participant() -> None:
         client=http_client,
     )
 
-    channel_id = await adapter.originate("1001", "2001")
-    await adapter.mute(channel_id, "2001")
-    await adapter.unmute(channel_id, "2001")
-    await adapter.remove_participant(channel_id, "2001")
-    await adapter.hangup(channel_id)
-    await http_client.aclose()
+    call_id = "call-1"
+    source_channel = await adapter.originate("1001", "2001", call_id)
+    target_channel = await adapter.originate_participant(call_id, "2001")
+    await adapter.bridge_call(call_id)
+    await adapter.mute(call_id, "2001")
+    await adapter.unmute(call_id, "2001")
 
-    assert channel_id == "ari-channel-1"
-    assert [request.method for request in requests] == [
-        "POST",
-        "POST",
-        "DELETE",
-        "DELETE",
-        "DELETE",
-    ]
-    assert requests[0].url.path == "/ari/channels"
-    assert requests[0].url.params["endpoint"] == "PJSIP/2001"
-    assert requests[0].url.params["app"] == "tccs-core"
-    assert requests[0].url.params["appArgs"] == "outbound,1001,2001"
-    assert requests[1].url.path == "/ari/channels/ari-channel-1/mute"
-    assert requests[1].url.params["direction"] == "both"
-    assert requests[2].url.path == "/ari/channels/ari-channel-1/mute"
-    assert requests[2].url.params["direction"] == "both"
-    assert requests[3].url.path == "/ari/channels/ari-channel-1"
-    assert requests[4].url.path == "/ari/channels/ari-channel-1"
+    assert source_channel == "source-channel"
+    assert target_channel == "target-channel"
+    assert requests[0].url.params["endpoint"] == "PJSIP/1001"
+    assert requests[0].url.params["appArgs"] == f"source,{call_id},2001"
+    assert requests[1].url.params["endpoint"] == "PJSIP/2001"
+    assert requests[1].url.params["appArgs"] == f"callee,{call_id},1001"
+    assert requests[2].url.path == "/ari/bridges"
+    assert requests[3].url.path == "/ari/bridges/bridge-1/addChannel"
+    assert requests[3].url.params["channel"] == "source-channel,target-channel"
+
+    await adapter.cleanup_call(call_id, source_channel)
+    await http_client.aclose()
 
 
 @pytest.mark.asyncio
