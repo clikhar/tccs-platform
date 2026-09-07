@@ -41,7 +41,7 @@ async def test_asterisk_adapter_maps_call_legs_and_bridge() -> None:
     assert requests[1].url.params["endpoint"] == "PJSIP/2001"
     assert requests[1].url.params["appArgs"] == f"callee,{call_id},1001"
     assert requests[2].url.path == "/ari/bridges"
-    assert requests[3].url.path == "/ari/bridges/bridge-1/addChannel"
+    assert requests[3].url.path == "/ari/bridges/tccs-call-1/addChannel"
     assert requests[3].url.params["channel"] == "source-channel,target-channel"
 
     await adapter.cleanup_call(call_id, source_channel)
