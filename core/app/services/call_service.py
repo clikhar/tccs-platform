@@ -34,6 +34,21 @@ class CallService:
             participant.asterisk_channel_id = channel_id
             self._add_event_by_id(call_id, "asterisk.channel.bound", "asterisk", {"channel_id": channel_id, "extension": extension})
 
+    async def mark_asterisk_leg(self, call_id: UUID, extension: str, channel_id: str, connected: bool) -> None:
+        async with self.session.begin():
+            participant = await self._participant(call_id, extension)
+            participant.asterisk_channel_id = channel_id
+            if connected:
+                participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
+                call = await self.calls.get(call_id)
+                if call is not None:
+                    call.state = CallState.CONNECTED.value
+            else:
+                call = await self.calls.get(call_id)
+                if call is not None and call.state == CallState.INITIATED.value:
+                    call.state = CallState.RINGING.value
+            self._add_event_by_id(call_id, "asterisk.channel.started", "asterisk", {"channel_id": channel_id, "extension": extension, "connected": connected})
+
     async def fail(self, call_id: UUID, actor: str, detail: str) -> None:
         async with self.session.begin():
             call = await self.calls.get(call_id)
