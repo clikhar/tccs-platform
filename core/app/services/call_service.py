@@ -34,7 +34,9 @@ class CallService:
             participant.asterisk_channel_id = channel_id
             self._add_event_by_id(call_id, "asterisk.channel.bound", "asterisk", {"channel_id": channel_id, "extension": extension})
 
-    async def mark_asterisk_leg(self, call_id: UUID, extension: str, channel_id: str, connected: bool) -> None:
+    async def mark_asterisk_leg(self, call_id: UUID, extension: str, channel_id: str | None, connected: bool) -> None:
+        if not channel_id:
+            return
         async with self.session.begin():
             participant = await self._participant(call_id, extension)
             participant.asterisk_channel_id = channel_id
@@ -141,6 +143,10 @@ class CallService:
 
     async def participants(self, call_id: UUID) -> list[CallParticipant]:
         result = await self.session.execute(select(CallParticipant).where(CallParticipant.call_id == call_id).order_by(CallParticipant.extension))
+        return list(result.scalars())
+
+    async def participants_for_channel(self, channel_id: str) -> list[CallParticipant]:
+        result = await self.session.execute(select(CallParticipant).where(CallParticipant.asterisk_channel_id == channel_id))
         return list(result.scalars())
 
     async def _handle_stasis_start(self, event: AsteriskEvent) -> bool:
