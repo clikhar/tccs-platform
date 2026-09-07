@@ -24,7 +24,7 @@ async def session():
 
 
 @pytest.mark.asyncio
-async def test_create_individual_originates_and_binds_channel(session: AsyncSession) -> None:
+async def test_create_individual_originates_and_binds_caller_channel(session: AsyncSession) -> None:
     asterisk = AsyncMock()
     asterisk.originate.return_value = "1700000000.10"
     orchestrator = CallOrchestrator(session, asterisk)
@@ -34,10 +34,10 @@ async def test_create_individual_originates_and_binds_channel(session: AsyncSess
     assert UUID(status.call_id)
     assert status.source == "1001"
     assert status.target == "2001"
-    asterisk.originate.assert_awaited_once_with("1001", "2001")
+    asterisk.originate.assert_awaited_once_with("1001", "2001", status.call_id)
 
     participant = next(
         p for p in await orchestrator.service.participants(UUID(status.call_id))
-        if p.extension == "2001"
+        if p.extension == "1001"
     )
     assert participant.asterisk_channel_id == "1700000000.10"
