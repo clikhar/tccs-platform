@@ -56,6 +56,27 @@ async def test_initiate_persists_call_event_and_participants(session: AsyncSessi
 
 
 @pytest.mark.asyncio
+async def test_ari_leg_update_after_read_uses_a_clean_transaction(session: AsyncSession) -> None:
+    service = CallService(session)
+    status = await service.initiate(CallRequest(source="1001", target="2001"))
+    call_id = uuid.UUID(status.call_id)
+
+    # service.get() performs a SELECT and implicitly starts a transaction.
+    # The event processor must be able to follow that read with the write
+    # operation used when a source/callee enters Stasis.
+    assert await service.get(call_id) == status
+    await session.rollback()
+    await service.mark_asterisk_leg(call_id, "1001", "1700000000.10", connected=True)
+
+    participant = next(
+        p for p in await service.participants(call_id) if p.extension == "1001"
+    )
+    assert participant.asterisk_channel_id == "1700000000.10"
+    assert participant.connected_at is not None
+    await session.rollback()
+
+
+@pytest.mark.asyncio
 async def test_conference_persists_muted_participants_and_state(session: AsyncSession) -> None:
     service = CallService(session)
 
