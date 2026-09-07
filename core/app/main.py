@@ -37,7 +37,7 @@ async def startup() -> None:
         username=settings.asterisk_ari_username,
         password=settings.asterisk_ari_password,
         app=settings.asterisk_ari_app,
-        handler=AsteriskEventProcessor(),
+        handler=AsteriskEventProcessor(_asterisk_client),
         reconnect_delay=settings.asterisk_ari_reconnect_delay,
     )
     _asterisk_event_task = asyncio.create_task(_asterisk_event_stream.run_forever())
