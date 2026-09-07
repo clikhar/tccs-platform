@@ -55,6 +55,21 @@ async def test_dispatches_stasis_start_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handler_failure_does_not_propagate() -> None:
+    async def handler(event) -> None:
+        raise RuntimeError("database failure")
+
+    stream = AsteriskEventStream(
+        base_url="http://localhost:8088",
+        username="ari",
+        password="secret",
+        handler=handler,
+    )
+
+    await stream.handle_message(json.dumps({"type": "StasisStart", "channel": {"id": "1"}}))
+
+
+@pytest.mark.asyncio
 async def test_normalizes_event_without_channel() -> None:
     stream = AsteriskEventStream("http://localhost:8088", "ari", "secret")
 
