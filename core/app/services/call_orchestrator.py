@@ -20,9 +20,9 @@ class CallOrchestrator:
 
         call_id = UUID(status.call_id)
         try:
-            channel_id = await self.asterisk.originate(request.source, request.target)
+            channel_id = await self.asterisk.originate(request.source, request.target, status.call_id)
         except Exception as exc:
             await self.service.fail(call_id, actor="asterisk", detail=str(exc))
             raise
-        await self.service.bind_asterisk_channel(call_id, request.target, channel_id)
+        await self.service.bind_asterisk_channel(call_id, request.source, channel_id)
         return (await self.service.get(call_id)) or status
