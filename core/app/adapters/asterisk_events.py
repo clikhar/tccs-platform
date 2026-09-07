@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import websockets
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,18 +76,26 @@ class AsteriskEventStream:
                         except asyncio.TimeoutError:
                             continue
                         await self.handle_message(message)
-            except (OSError, websockets.WebSocketException):
+            except (OSError, websockets.WebSocketException) as exc:
+                logger.warning("Asterisk ARI websocket disconnected: %s", exc)
                 if not self._stop.is_set():
                     await asyncio.sleep(self._reconnect_delay)
 
     async def handle_message(self, message: str | bytes) -> None:
-        """Parse one ARI JSON event and dispatch it to the handler."""
+        """Parse one ARI JSON event and dispatch it without killing the stream."""
         if isinstance(message, bytes):
             message = message.decode("utf-8")
         payload = json.loads(message)
         event = self.normalize(payload)
         if self._handler is not None:
-            await self._handler(event)
+            try:
+                await self._handler(event)
+            except Exception:
+                logger.exception(
+                    "Asterisk ARI event handler failed for %s channel=%s",
+                    event.event_type,
+                    event.channel_id,
+                )
 
     @staticmethod
     def normalize(payload: dict) -> AsteriskEvent:
