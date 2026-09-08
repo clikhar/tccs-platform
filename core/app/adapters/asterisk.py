@@ -76,14 +76,13 @@ class AsteriskHttpClient:
         if existing:
             return existing
         endpoint = participant if "/" in participant else f"PJSIP/{participant}"
-        source = next(iter(channels))
         response = await self._request(
             "POST",
             "/channels",
             params={
                 "endpoint": endpoint,
                 "app": self._app,
-                "appArgs": f"callee,{call_key},{source}",
+                "appArgs": f"callee,{call_key},{participant}",
             },
         )
         channel_id = response.json()["id"]
