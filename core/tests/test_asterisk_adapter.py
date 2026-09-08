@@ -59,7 +59,8 @@ async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "POST" and request.url.path == "/ari/channels":
-            participant = request.url.params["appArgs"].split(",")[-1]
+            endpoint = request.url.params["endpoint"]
+            participant = endpoint.removeprefix("PJSIP/")
             return httpx.Response(200, json={"id": f"{participant}-channel"})
         if request.method == "POST" and request.url.path == "/ari/bridges":
             bridge_ready.set()
