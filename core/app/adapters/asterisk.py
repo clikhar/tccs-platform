@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 import httpx
@@ -49,6 +50,7 @@ class AsteriskHttpClient:
         self._participants: dict[str, dict[str, str]] = {}
         self._bridges: dict[str, str] = {}
         self._bridged_channels: dict[str, set[str]] = {}
+        self._bridge_locks: dict[str, asyncio.Lock] = {}
 
     async def originate(self, source: str, target: str, call_id: str) -> str:
         """Originate the caller leg; targets are originated after the caller enters Stasis."""
@@ -91,40 +93,47 @@ class AsteriskHttpClient:
 
     async def bridge_call(self, call_id: str) -> None:
         call_key = str(call_id)
-        channels = self._participants.get(call_key, {})
-        if len(channels) < 2:
-            raise AsteriskAdapterError(f"call {call_key!r} does not have two channels to bridge")
-        bridge_id = self._bridges.get(call_key)
-        if bridge_id is None:
-            bridge_id = f"tccs-{call_key}"
-            try:
-                await self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id})
-            except AsteriskAdapterError as exc:
-                if "HTTP 409" not in str(exc):
-                    raise
-            self._bridges[call_key] = bridge_id
-            self._bridged_channels[call_key] = set()
+        lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
+        async with lock:
+            channels = self._participants.get(call_key, {})
+            if len(channels) < 2:
+                raise AsteriskAdapterError(f"call {call_key!r} does not have two channels to bridge")
+            bridge_id = self._bridges.get(call_key)
+            if bridge_id is None:
+                bridge_id = f"tccs-{call_key}"
+                try:
+                    await self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id})
+                except AsteriskAdapterError as exc:
+                    if "HTTP 409" not in str(exc):
+                        raise
+                self._bridges[call_key] = bridge_id
+                self._bridged_channels[call_key] = set()
 
-        try:
-            pending = [channel_id for channel_id in channels.values() if channel_id not in self._bridged_channels[call_key]]
-            if pending:
-                await self._request(
-                    "POST",
-                    f"/bridges/{bridge_id}/addChannel",
-                    params={"channel": ",".join(pending)},
-                )
-                self._bridged_channels[call_key].update(pending)
-        except Exception:
-            if call_key not in self._bridged_channels or not self._bridged_channels[call_key]:
-                self._bridges.pop(call_key, None)
-                self._bridged_channels.pop(call_key, None)
-                await self._safe_request("DELETE", f"/bridges/{bridge_id}")
-            raise
+            try:
+                pending = [
+                    channel_id
+                    for channel_id in channels.values()
+                    if channel_id not in self._bridged_channels[call_key]
+                ]
+                if pending:
+                    await self._request(
+                        "POST",
+                        f"/bridges/{bridge_id}/addChannel",
+                        params={"channel": ",".join(pending)},
+                    )
+                    self._bridged_channels[call_key].update(pending)
+            except Exception:
+                if call_key not in self._bridged_channels or not self._bridged_channels[call_key]:
+                    self._bridges.pop(call_key, None)
+                    self._bridged_channels.pop(call_key, None)
+                    await self._safe_request("DELETE", f"/bridges/{bridge_id}")
+                raise
 
     async def cleanup_call(self, call_id: str, channel_id: str) -> None:
         call_key = str(call_id)
         bridge_id = self._bridges.pop(call_key, None)
         self._bridged_channels.pop(call_key, None)
+        self._bridge_locks.pop(call_key, None)
         if bridge_id:
             await self._safe_request("DELETE", f"/bridges/{bridge_id}")
         channels = self._participants.pop(call_key, {})
@@ -138,6 +147,7 @@ class AsteriskHttpClient:
         self._participants.pop(str(call_id), None)
         self._bridges.pop(str(call_id), None)
         self._bridged_channels.pop(str(call_id), None)
+        self._bridge_locks.pop(str(call_id), None)
 
     async def mute(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
