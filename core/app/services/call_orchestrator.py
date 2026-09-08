@@ -34,7 +34,12 @@ class CallOrchestrator:
         mode: str,
         conference_id: str,
     ) -> CallStatus:
-        """Create a persistent conference and originate every conference leg."""
+        """Create a persistent conference and start its caller leg.
+
+        The ARI Stasis event processor owns participant origination after the
+        caller enters Stasis. This keeps one authoritative path for every
+        conference participant and avoids originating the first target twice.
+        """
         status = await self.service.initiate_conference(
             source=source,
             targets=targets,
@@ -43,17 +48,8 @@ class CallOrchestrator:
         )
         call_id = UUID(status.call_id)
         try:
-            # The first target is carried in appArgs for the caller Stasis
-            # lifecycle. All conference participants are explicitly originated
-            # and then placed into the same mixing bridge.
-            source_channel = await self.asterisk.originate(source, targets[0], status.call_id)
+            source_channel = await self.asterisk.originate(source, ",".join(dict.fromkeys(targets)), status.call_id)
             await self.service.bind_asterisk_channel(call_id, source, source_channel)
-
-            for participant in targets:
-                channel_id = await self.asterisk.originate_participant(status.call_id, participant)
-                await self.service.bind_asterisk_channel(call_id, participant, channel_id)
-
-            await self.asterisk.bridge_call(status.call_id)
         except Exception as exc:
             await self.service.fail(call_id, actor="asterisk", detail=str(exc))
             raise
