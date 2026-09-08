@@ -26,16 +26,20 @@ class AsteriskEventProcessor:
                     return
                 await session.rollback()
                 await service.mark_asterisk_leg(call_id, status.source, event.channel_id, connected=True)
-                await self.asterisk.originate_participant(call_id, status.target or str(args[2]))
+
+                # Conferences persist their targets as a comma-separated value.
+                # Originate each endpoint separately; never pass the entire list
+                # to Asterisk as one PJSIP endpoint.
+                targets = [target.strip() for target in (status.target or str(args[2])).split(",") if target.strip()]
+                for target in dict.fromkeys(targets):
+                    await self.asterisk.originate_participant(call_id, target)
                 return
 
             if event.event_type == "StasisStart" and len(args) >= 3 and args[0] == "callee":
                 call_id = UUID(str(args[1]))
-                status = await service.get(call_id)
-                if status is None or status.target is None:
-                    return
+                participant = str(args[2])
                 await session.rollback()
-                await service.mark_asterisk_leg(call_id, status.target, event.channel_id, connected=True)
+                await service.mark_asterisk_leg(call_id, participant, event.channel_id, connected=True)
                 await self.asterisk.bridge_call(call_id)
                 return
 
