@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 from uuid import UUID
@@ -46,6 +48,55 @@ async def test_asterisk_adapter_maps_call_legs_and_bridge() -> None:
     assert requests[3].url.params["channel"] == "source-channel,target-channel"
 
     await adapter.cleanup_call(call_id, source_channel)
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
+    requests: list[httpx.Request] = []
+    bridge_ready = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/ari/channels":
+            participant = request.url.params["appArgs"].split(",")[-1]
+            return httpx.Response(200, json={"id": f"{participant}-channel"})
+        if request.method == "POST" and request.url.path == "/ari/bridges":
+            bridge_ready.set()
+            return httpx.Response(200, json={"id": "bridge-1"})
+        if request.method == "POST" and request.url.path == "/ari/bridges/bridge-1/addChannel":
+            return httpx.Response(204)
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    adapter = AsteriskHttpClient(
+        base_url="http://asterisk.example/ari",
+        username="tccs",
+        password="secret",
+        client=http_client,
+    )
+
+    call_id = "call-concurrent"
+    await adapter.originate("1001", "2001", call_id)
+    await adapter.originate_participant(call_id, "2001")
+    await adapter.originate_participant(call_id, "2002")
+
+    first = asyncio.create_task(adapter.bridge_call(call_id))
+    await bridge_ready.wait()
+    second = asyncio.create_task(adapter.bridge_call(call_id))
+    await asyncio.gather(first, second)
+
+    bridge_creations = [request for request in requests if request.url.path == "/ari/bridges"]
+    add_requests = [
+        request
+        for request in requests
+        if request.url.path == "/ari/bridges/bridge-1/addChannel"
+    ]
+    assert len(bridge_creations) == 1
+    assert len(add_requests) == 1
+    assert add_requests[0].url.params["channel"] == "1001-channel,2001-channel,2002-channel"
+
     await http_client.aclose()
 
 
