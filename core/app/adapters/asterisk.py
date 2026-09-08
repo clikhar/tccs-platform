@@ -132,9 +132,6 @@ class AsteriskHttpClient:
                             f"participant {participant!r} is not mapped to call {call_key!r}"
                         ) from exc
 
-                    # originate() inserts the source first, so the first mapped
-                    # channel is the source. If it is already bridged, only add the
-                    # newly-arrived participant.
                     source_channel = next(iter(channels.values()))
                     requested = [source_channel, participant_channel]
                     pending = [
@@ -168,11 +165,18 @@ class AsteriskHttpClient:
         lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
         async with lock:
             channels = self._participants.get(call_key, {})
-            ended_channel = channels.pop(channel_id, None)
-            if ended_channel is None:
-                # The channel may already have been removed by an earlier cleanup.
-                ended_channel = channel_id
-            self._bridged_channels.get(call_key, set()).discard(ended_channel)
+
+            # _participants is keyed by extension/participant name, while StasisEnd
+            # gives us the Asterisk channel identity. Remove the matching leg by
+            # value, not by dictionary key.
+            participant_key = next(
+                (participant for participant, mapped_channel in channels.items() if mapped_channel == channel_id),
+                None,
+            )
+            if participant_key is not None:
+                channels.pop(participant_key, None)
+
+            self._bridged_channels.get(call_key, set()).discard(channel_id)
 
             if len(channels) >= 2:
                 return
