@@ -34,10 +34,12 @@ class CallOrchestrator:
         mode: str,
         conference_id: str,
     ) -> CallStatus:
-        """Create a persistent conference and originate its legs.
+        """Create a persistent conference and enter the source into Stasis.
 
-        Participant origination is idempotent in the Asterisk adapter so this
-        remains safe if the source Stasis event races with this request.
+        Conference participants are originated from the source Stasis event.
+        This keeps ARI bridge operations ordered after each channel has actually
+        entered the Stasis application, avoiding a race where addChannel sees a
+        freshly originated channel that is not in Stasis yet.
         """
         status = await self.service.initiate_conference(
             source=source,
@@ -49,12 +51,6 @@ class CallOrchestrator:
         try:
             source_channel = await self.asterisk.originate(source, targets[0], status.call_id)
             await self.service.bind_asterisk_channel(call_id, source, source_channel)
-
-            for participant in dict.fromkeys(targets):
-                channel_id = await self.asterisk.originate_participant(status.call_id, participant)
-                await self.service.bind_asterisk_channel(call_id, participant, channel_id)
-
-            await self.asterisk.bridge_call(status.call_id)
         except Exception as exc:
             await self.service.fail(call_id, actor="asterisk", detail=str(exc))
             raise
