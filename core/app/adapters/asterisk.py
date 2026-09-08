@@ -72,6 +72,9 @@ class AsteriskHttpClient:
         channels = self._participants.get(call_key, {})
         if not channels:
             raise AsteriskAdapterError(f"no caller channel mapped for call {call_key!r}")
+        existing = channels.get(participant)
+        if existing:
+            return existing
         endpoint = participant if "/" in participant else f"PJSIP/{participant}"
         source = next(iter(channels))
         response = await self._request(
