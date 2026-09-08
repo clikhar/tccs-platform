@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from uuid import UUID
 
 from app.adapters.asterisk import AsteriskAdapterError, AsteriskHttpClient
 
@@ -45,6 +46,31 @@ async def test_asterisk_adapter_maps_call_legs_and_bridge() -> None:
     assert requests[3].url.params["channel"] == "source-channel,target-channel"
 
     await adapter.cleanup_call(call_id, source_channel)
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_asterisk_adapter_accepts_uuid_after_string_mapping() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/ari/channels":
+            return httpx.Response(200, json={"id": "source-channel"})
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    adapter = AsteriskHttpClient(
+        "http://asterisk.example/ari",
+        "tccs",
+        "secret",
+        client=http_client,
+    )
+
+    call_id = "e6c7b8a5-c972-41b4-a1fd-403b72331b43"
+    await adapter.originate("1001", "2001", call_id)
+    channel_id = await adapter.originate_participant(UUID(call_id), "2001")
+
+    assert channel_id == "source-channel"
+
     await http_client.aclose()
 
 
