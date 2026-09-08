@@ -48,9 +48,10 @@ class AsteriskHttpClient:
         self._owns_client = client is None
         self._participants: dict[str, dict[str, str]] = {}
         self._bridges: dict[str, str] = {}
+        self._bridged_channels: dict[str, set[str]] = {}
 
     async def originate(self, source: str, target: str, call_id: str) -> str:
-        """Originate the caller leg; the target is originated after the caller answers."""
+        """Originate the caller leg; targets are originated after the caller enters Stasis."""
         call_key = str(call_id)
         endpoint = source if "/" in source else f"PJSIP/{source}"
         response = await self._request(
@@ -79,7 +80,7 @@ class AsteriskHttpClient:
             params={
                 "endpoint": endpoint,
                 "app": self._app,
-                "appArgs": f"callee,{call_key},{source}",
+                "appArgs": f"callee,{call_key},{participant}",
             },
         )
         channel_id = response.json()["id"]
@@ -91,29 +92,37 @@ class AsteriskHttpClient:
         channels = self._participants.get(call_key, {})
         if len(channels) < 2:
             raise AsteriskAdapterError(f"call {call_key!r} does not have two channels to bridge")
-        if call_key in self._bridges:
-            return
-        bridge_id = f"tccs-{call_key}"
+        bridge_id = self._bridges.get(call_key)
+        if bridge_id is None:
+            bridge_id = f"tccs-{call_key}"
+            try:
+                await self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id})
+            except AsteriskAdapterError as exc:
+                if "HTTP 409" not in str(exc):
+                    raise
+            self._bridges[call_key] = bridge_id
+            self._bridged_channels[call_key] = set()
+
         try:
-            await self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id})
-        except AsteriskAdapterError as exc:
-            if "HTTP 409" not in str(exc):
-                raise
-        self._bridges[call_key] = bridge_id
-        try:
-            await self._request(
-                "POST",
-                f"/bridges/{bridge_id}/addChannel",
-                params={"channel": ",".join(channels.values())},
-            )
+            pending = [channel_id for channel_id in channels.values() if channel_id not in self._bridged_channels[call_key]]
+            if pending:
+                await self._request(
+                    "POST",
+                    f"/bridges/{bridge_id}/addChannel",
+                    params={"channel": ",".join(pending)},
+                )
+                self._bridged_channels[call_key].update(pending)
         except Exception:
-            self._bridges.pop(call_key, None)
-            await self._safe_request("DELETE", f"/bridges/{bridge_id}")
+            if call_key not in self._bridged_channels or not self._bridged_channels[call_key]:
+                self._bridges.pop(call_key, None)
+                self._bridged_channels.pop(call_key, None)
+                await self._safe_request("DELETE", f"/bridges/{bridge_id}")
             raise
 
     async def cleanup_call(self, call_id: str, channel_id: str) -> None:
         call_key = str(call_id)
         bridge_id = self._bridges.pop(call_key, None)
+        self._bridged_channels.pop(call_key, None)
         if bridge_id:
             await self._safe_request("DELETE", f"/bridges/{bridge_id}")
         channels = self._participants.pop(call_key, {})
@@ -125,6 +134,8 @@ class AsteriskHttpClient:
         channel_id = call_id
         await self._request("DELETE", f"/channels/{channel_id}")
         self._participants.pop(str(call_id), None)
+        self._bridges.pop(str(call_id), None)
+        self._bridged_channels.pop(str(call_id), None)
 
     async def mute(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
@@ -138,6 +149,7 @@ class AsteriskHttpClient:
         channel_id = self._channel_for(call_id, participant)
         await self._request("DELETE", f"/channels/{channel_id}")
         self._participants.get(str(call_id), {}).pop(participant, None)
+        self._bridged_channels.get(str(call_id), set()).discard(channel_id)
 
     async def aclose(self) -> None:
         if self._owns_client:
