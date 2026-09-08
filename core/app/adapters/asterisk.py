@@ -83,7 +83,7 @@ class AsteriskHttpClient:
             params={
                 "endpoint": endpoint,
                 "app": self._app,
-                "appArgs": f"callee,{call_key},{participant}",
+                "appArgs": f"callee,{call_key},{source}",
             },
         )
         channel_id = response.json()["id"]
