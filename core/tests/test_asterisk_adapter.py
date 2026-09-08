@@ -64,7 +64,7 @@ async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
         if request.method == "POST" and request.url.path == "/ari/bridges":
             bridge_ready.set()
             return httpx.Response(200, json={"id": "bridge-1"})
-        if request.method == "POST" and request.url.path == "/ari/bridges/bridge-1/addChannel":
+        if request.method == "POST" and request.url.path == "/ari/bridges/tccs-call-concurrent/addChannel":
             return httpx.Response(204)
         return httpx.Response(204)
 
@@ -91,7 +91,7 @@ async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
     add_requests = [
         request
         for request in requests
-        if request.url.path == "/ari/bridges/bridge-1/addChannel"
+        if request.url.path == "/ari/bridges/tccs-call-concurrent/addChannel"
     ]
     assert len(bridge_creations) == 1
     assert len(add_requests) == 1
