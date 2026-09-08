@@ -83,9 +83,9 @@ async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
     await adapter.originate_participant(call_id, "2001")
     await adapter.originate_participant(call_id, "2002")
 
-    first = asyncio.create_task(adapter.bridge_call(call_id))
+    first = asyncio.create_task(adapter.bridge_call(call_id, "2001"))
     await bridge_ready.wait()
-    second = asyncio.create_task(adapter.bridge_call(call_id))
+    second = asyncio.create_task(adapter.bridge_call(call_id, "2002"))
     await asyncio.gather(first, second)
 
     bridge_creations = [request for request in requests if request.url.path == "/ari/bridges"]
@@ -95,8 +95,9 @@ async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
         if request.url.path == "/ari/bridges/tccs-call-concurrent/addChannel"
     ]
     assert len(bridge_creations) == 1
-    assert len(add_requests) == 1
-    assert add_requests[0].url.params["channel"] == "1001-channel,2001-channel,2002-channel"
+    assert len(add_requests) == 2
+    assert add_requests[0].url.params["channel"] == "1001-channel,2001-channel"
+    assert add_requests[1].url.params["channel"] == "2002-channel"
 
     await http_client.aclose()
 
