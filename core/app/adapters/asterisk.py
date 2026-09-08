@@ -51,6 +51,7 @@ class AsteriskHttpClient:
 
     async def originate(self, source: str, target: str, call_id: str) -> str:
         """Originate the caller leg; the target is originated after the caller answers."""
+        call_key = str(call_id)
         endpoint = source if "/" in source else f"PJSIP/{source}"
         response = await self._request(
             "POST",
@@ -58,17 +59,18 @@ class AsteriskHttpClient:
             params={
                 "endpoint": endpoint,
                 "app": self._app,
-                "appArgs": f"source,{call_id},{target}",
+                "appArgs": f"source,{call_key},{target}",
             },
         )
         channel_id = response.json()["id"]
-        self._participants.setdefault(call_id, {})[source] = channel_id
+        self._participants.setdefault(call_key, {})[source] = channel_id
         return channel_id
 
     async def originate_participant(self, call_id: str, participant: str) -> str:
-        channels = self._participants.get(call_id, {})
+        call_key = str(call_id)
+        channels = self._participants.get(call_key, {})
         if not channels:
-            raise AsteriskAdapterError(f"no caller channel mapped for call {call_id!r}")
+            raise AsteriskAdapterError(f"no caller channel mapped for call {call_key!r}")
         endpoint = participant if "/" in participant else f"PJSIP/{participant}"
         source = next(iter(channels))
         response = await self._request(
@@ -77,26 +79,27 @@ class AsteriskHttpClient:
             params={
                 "endpoint": endpoint,
                 "app": self._app,
-                "appArgs": f"callee,{call_id},{source}",
+                "appArgs": f"callee,{call_key},{source}",
             },
         )
         channel_id = response.json()["id"]
-        self._participants.setdefault(call_id, {})[participant] = channel_id
+        self._participants.setdefault(call_key, {})[participant] = channel_id
         return channel_id
 
     async def bridge_call(self, call_id: str) -> None:
-        channels = self._participants.get(call_id, {})
+        call_key = str(call_id)
+        channels = self._participants.get(call_key, {})
         if len(channels) < 2:
-            raise AsteriskAdapterError(f"call {call_id!r} does not have two channels to bridge")
-        if call_id in self._bridges:
+            raise AsteriskAdapterError(f"call {call_key!r} does not have two channels to bridge")
+        if call_key in self._bridges:
             return
-        bridge_id = f"tccs-{call_id}"
+        bridge_id = f"tccs-{call_key}"
         try:
             await self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id})
         except AsteriskAdapterError as exc:
             if "HTTP 409" not in str(exc):
                 raise
-        self._bridges[call_id] = bridge_id
+        self._bridges[call_key] = bridge_id
         try:
             await self._request(
                 "POST",
@@ -104,15 +107,16 @@ class AsteriskHttpClient:
                 params={"channel": ",".join(channels.values())},
             )
         except Exception:
-            self._bridges.pop(call_id, None)
+            self._bridges.pop(call_key, None)
             await self._safe_request("DELETE", f"/bridges/{bridge_id}")
             raise
 
     async def cleanup_call(self, call_id: str, channel_id: str) -> None:
-        bridge_id = self._bridges.pop(call_id, None)
+        call_key = str(call_id)
+        bridge_id = self._bridges.pop(call_key, None)
         if bridge_id:
             await self._safe_request("DELETE", f"/bridges/{bridge_id}")
-        channels = self._participants.pop(call_id, {})
+        channels = self._participants.pop(call_key, {})
         for other_channel_id in channels.values():
             if other_channel_id != channel_id:
                 await self._safe_request("DELETE", f"/channels/{other_channel_id}")
@@ -120,7 +124,7 @@ class AsteriskHttpClient:
     async def hangup(self, call_id: str) -> None:
         channel_id = call_id
         await self._request("DELETE", f"/channels/{channel_id}")
-        self._participants.pop(channel_id, None)
+        self._participants.pop(str(call_id), None)
 
     async def mute(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
@@ -133,18 +137,19 @@ class AsteriskHttpClient:
     async def remove_participant(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
         await self._request("DELETE", f"/channels/{channel_id}")
-        self._participants.get(call_id, {}).pop(participant, None)
+        self._participants.get(str(call_id), {}).pop(participant, None)
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
     def _channel_for(self, call_id: str, participant: str) -> str:
+        call_key = str(call_id)
         try:
-            return self._participants[call_id][participant]
+            return self._participants[call_key][participant]
         except KeyError as exc:
             raise AsteriskAdapterError(
-                f"participant {participant!r} is not mapped to call {call_id!r}"
+                f"participant {participant!r} is not mapped to call {call_key!r}"
             ) from exc
 
     async def _safe_request(self, method: str, path: str, **kwargs: object) -> None:
