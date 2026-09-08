@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters.asterisk import AsteriskClient
@@ -16,8 +18,6 @@ class CallOrchestrator:
 
     async def create_individual(self, request: CallRequest) -> CallStatus:
         status = await self.service.initiate(request)
-        from uuid import UUID
-
         call_id = UUID(status.call_id)
         try:
             channel_id = await self.asterisk.originate(request.source, request.target, status.call_id)
@@ -25,4 +25,36 @@ class CallOrchestrator:
             await self.service.fail(call_id, actor="asterisk", detail=str(exc))
             raise
         await self.service.bind_asterisk_channel(call_id, request.source, channel_id)
+        return (await self.service.get(call_id)) or status
+
+    async def create_conference(
+        self,
+        source: str,
+        targets: list[str],
+        mode: str,
+        conference_id: str,
+    ) -> CallStatus:
+        """Create a persistent conference and originate every conference leg."""
+        status = await self.service.initiate_conference(
+            source=source,
+            targets=targets,
+            mode=mode,
+            conference_id=conference_id,
+        )
+        call_id = UUID(status.call_id)
+        try:
+            # The first target is carried in appArgs for the caller Stasis
+            # lifecycle. All conference participants are explicitly originated
+            # and then placed into the same mixing bridge.
+            source_channel = await self.asterisk.originate(source, targets[0], status.call_id)
+            await self.service.bind_asterisk_channel(call_id, source, source_channel)
+
+            for participant in targets:
+                channel_id = await self.asterisk.originate_participant(status.call_id, participant)
+                await self.service.bind_asterisk_channel(call_id, participant, channel_id)
+
+            await self.asterisk.bridge_call(status.call_id)
+        except Exception as exc:
+            await self.service.fail(call_id, actor="asterisk", detail=str(exc))
+            raise
         return (await self.service.get(call_id)) or status
