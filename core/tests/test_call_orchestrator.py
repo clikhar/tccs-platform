@@ -41,3 +41,33 @@ async def test_create_individual_originates_and_binds_caller_channel(session: As
         if p.extension == "1001"
     )
     assert participant.asterisk_channel_id == "1700000000.10"
+
+
+@pytest.mark.asyncio
+async def test_create_conference_originates_all_legs_and_bridges_them(session: AsyncSession) -> None:
+    asterisk = AsyncMock()
+    asterisk.originate.return_value = "source-channel"
+    asterisk.originate_participant.side_effect = ["target-1002", "target-1003"]
+    orchestrator = CallOrchestrator(session, asterisk)
+
+    status = await orchestrator.create_conference(
+        source="1001",
+        targets=["1002", "1003"],
+        mode="group",
+        conference_id="group-test",
+    )
+
+    call_id = UUID(status.call_id)
+    assert status.state == "conference"
+    assert status.conference_id == "group-test"
+    asterisk.originate.assert_awaited_once_with("1001", "1002", status.call_id)
+    assert [call.args for call in asterisk.originate_participant.await_args_list] == [
+        (status.call_id, "1002"),
+        (status.call_id, "1003"),
+    ]
+    asterisk.bridge_call.assert_awaited_once_with(status.call_id)
+
+    participants = {p.extension: p for p in await orchestrator.service.participants(call_id)}
+    assert participants["1001"].asterisk_channel_id == "source-channel"
+    assert participants["1002"].asterisk_channel_id == "target-1002"
+    assert participants["1003"].asterisk_channel_id == "target-1003"
