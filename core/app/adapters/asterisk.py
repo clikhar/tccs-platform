@@ -13,7 +13,7 @@ class AsteriskClient(Protocol):
 
     async def originate_participant(self, call_id: str, participant: str) -> str: ...
 
-    async def bridge_call(self, call_id: str) -> None: ...
+    async def bridge_call(self, call_id: str, participant: str | None = None) -> None: ...
 
     async def cleanup_call(self, call_id: str, channel_id: str) -> None: ...
 
@@ -91,13 +91,20 @@ class AsteriskHttpClient:
         self._participants.setdefault(call_key, {})[participant] = channel_id
         return channel_id
 
-    async def bridge_call(self, call_id: str) -> None:
+    async def bridge_call(self, call_id: str, participant: str | None = None) -> None:
+        """Bridge the source and a participant after that participant enters Stasis.
+
+        When participant is provided, only the source leg and that participant's
+        channel are submitted to ARI. This prevents a group call from attempting
+        to add a concurrently originating leg that has not entered Stasis yet.
+        """
         call_key = str(call_id)
         lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
         async with lock:
             channels = self._participants.get(call_key, {})
             if len(channels) < 2:
                 raise AsteriskAdapterError(f"call {call_key!r} does not have two channels to bridge")
+
             bridge_id = self._bridges.get(call_key)
             if bridge_id is None:
                 bridge_id = f"tccs-{call_key}"
@@ -110,16 +117,37 @@ class AsteriskHttpClient:
                 self._bridged_channels[call_key] = set()
 
             try:
-                pending = [
-                    channel_id
-                    for channel_id in channels.values()
-                    if channel_id not in self._bridged_channels[call_key]
-                ]
+                if participant is None:
+                    pending = [
+                        channel_id
+                        for channel_id in channels.values()
+                        if channel_id not in self._bridged_channels[call_key]
+                    ]
+                else:
+                    try:
+                        requested = [channels[participant]]
+                        source = next(
+                            channel_id
+                            for name, channel_id in channels.items()
+                            if name != participant
+                            and channel_id not in self._bridged_channels[call_key]
+                        )
+                        requested.insert(0, source)
+                    except (KeyError, StopIteration) as exc:
+                        raise AsteriskAdapterError(
+                            f"participant {participant!r} is not mapped to call {call_key!r}"
+                        ) from exc
+                    pending = [
+                        channel_id
+                        for channel_id in requested
+                        if channel_id not in self._bridged_channels[call_key]
+                    ]
+
                 if pending:
                     await self._request(
                         "POST",
                         f"/bridges/{bridge_id}/addChannel",
-                        params={"channel": ",".join(pending)},
+                        params={"channel": ",".join(dict.fromkeys(pending))},
                     )
                     self._bridged_channels[call_key].update(pending)
             except Exception:
