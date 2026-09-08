@@ -40,7 +40,9 @@ class AsteriskEventProcessor:
                 participant = str(args[2])
                 await session.rollback()
                 await service.mark_asterisk_leg(call_id, participant, event.channel_id, connected=True)
-                await self.asterisk.bridge_call(call_id)
+                # Only bridge the source and this participant. Other conference
+                # legs may have been originated but have not entered Stasis yet.
+                await self.asterisk.bridge_call(call_id, participant)
                 return
 
             call_id: UUID | None = None
