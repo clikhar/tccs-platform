@@ -103,6 +103,50 @@ async def test_asterisk_adapter_serializes_concurrent_bridge_updates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_asterisk_adapter_keeps_conference_when_one_leg_ends() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/ari/channels":
+            endpoint = request.url.params["endpoint"]
+            participant = endpoint.removeprefix("PJSIP/")
+            return httpx.Response(200, json={"id": f"{participant}-channel"})
+        if request.method == "POST" and request.url.path == "/ari/bridges":
+            return httpx.Response(200, json={"id": "bridge-1"})
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    adapter = AsteriskHttpClient(
+        base_url="http://asterisk.example/ari",
+        username="tccs",
+        password="secret",
+        client=http_client,
+    )
+
+    call_id = "call-three-way"
+    source_channel = await adapter.originate("1001", "2001", call_id)
+    first_channel = await adapter.originate_participant(call_id, "2001")
+    second_channel = await adapter.originate_participant(call_id, "2002")
+    await adapter.bridge_call(call_id, "2001")
+    await adapter.bridge_call(call_id, "2002")
+
+    await adapter.cleanup_call(call_id, first_channel)
+
+    assert any(request.url.path == "/ari/bridges" for request in requests)
+    assert not any(request.url.path == "/ari/bridges/bridge-1" and request.method == "DELETE" for request in requests)
+    assert not any(request.url.path == f"/ari/channels/{source_channel}" and request.method == "DELETE" for request in requests)
+    assert not any(request.url.path == f"/ari/channels/{second_channel}" and request.method == "DELETE" for request in requests)
+
+    await adapter.cleanup_call(call_id, second_channel)
+    assert any(request.url.path == "/ari/bridges/bridge-1" and request.method == "DELETE" for request in requests)
+    assert any(request.url.path == f"/ari/channels/{source_channel}" and request.method == "DELETE" for request in requests)
+
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_asterisk_adapter_accepts_uuid_after_string_mapping() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/ari/channels":
