@@ -1,4 +1,4 @@
-import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -6,76 +6,48 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .adapters.asterisk import AsteriskHttpClient
-from .adapters.asterisk_event_processor import AsteriskEventProcessor
-from .adapters.asterisk_events import AsteriskEventStream
 from .config import settings
-from .db import check_database, close_database, get_db_session
+from .db import check_database, get_db_session
 from .models import CallRequest, CallStatus, ConferenceCallRequest, ParticipantActionRequest, ParticipantStatus
 from .services.call_orchestrator import CallOrchestrator
 from .services.call_service import CallService
 
-app = FastAPI(title=settings.app_name, version=settings.app_version)
-_asterisk_event_stream: AsteriskEventStream | None = None
-_asterisk_event_task: asyncio.Task | None = None
+
 _asterisk_client: AsteriskHttpClient | None = None
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    global _asterisk_event_stream, _asterisk_event_task, _asterisk_client
-    if not settings.asterisk_ari_enabled:
-        return
-    _asterisk_client = AsteriskHttpClient(
-        base_url=settings.asterisk_ari_url,
-        username=settings.asterisk_ari_username,
-        password=settings.asterisk_ari_password,
-        app=settings.asterisk_ari_app,
-        timeout=settings.asterisk_ari_timeout_seconds,
-    )
-    _asterisk_event_stream = AsteriskEventStream(
-        base_url=settings.asterisk_ari_url,
-        username=settings.asterisk_ari_username,
-        password=settings.asterisk_ari_password,
-        app=settings.asterisk_ari_app,
-        handler=AsteriskEventProcessor(_asterisk_client),
-        reconnect_delay=settings.asterisk_ari_reconnect_delay,
-    )
-    _asterisk_event_task = asyncio.create_task(_asterisk_event_stream.run_forever())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _asterisk_client
+    if settings.asterisk_ari_enabled:
+        _asterisk_client = AsteriskHttpClient(
+            base_url=settings.asterisk_ari_url,
+            username=settings.asterisk_ari_username,
+            password=settings.asterisk_ari_password,
+            app=settings.asterisk_ari_app,
+            timeout=settings.asterisk_ari_timeout_seconds,
+        )
+    try:
+        yield
+    finally:
+        if _asterisk_client is not None:
+            await _asterisk_client.aclose()
+            _asterisk_client = None
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    global _asterisk_event_stream, _asterisk_event_task, _asterisk_client
-    if _asterisk_event_stream is not None:
-        await _asterisk_event_stream.stop()
-    if _asterisk_event_task is not None:
-        try:
-            await asyncio.wait_for(_asterisk_event_task, timeout=3.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            _asterisk_event_task.cancel()
-    if _asterisk_client is not None:
-        await _asterisk_client.aclose()
-    _asterisk_event_stream = None
-    _asterisk_event_task = None
-    _asterisk_client = None
-    await close_database()
-
-
-@app.get("/api/v1/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name, "version": settings.app_version}
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 
 @app.get("/api/v1/health/live")
-async def liveness() -> dict[str, str]:
-    return {"status": "ok", "service": settings.app_name}
+async def health_live() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/api/v1/health/ready")
-async def readiness() -> dict[str, str]:
+async def health_ready() -> dict[str, str]:
     if not await check_database():
         raise HTTPException(status_code=503, detail="database unavailable")
-    return {"status": "ready", "database": "ok", "service": settings.app_name}
+    return {"status": "ready"}
 
 
 @app.get("/api/v1/system/status")
@@ -154,10 +126,29 @@ def _parse_call_id(call_id: str) -> UUID:
 
 
 async def _create_conference(request: ConferenceCallRequest, mode: str, session: AsyncSession) -> CallStatus:
+    conference_id = f"{mode}-{uuid4()}"
     try:
-        return await CallService(session).initiate_conference(source=request.source, targets=request.targets, mode=mode, conference_id=f"{mode}-{uuid4()}")
+        if settings.asterisk_ari_enabled:
+            if _asterisk_client is None:
+                raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+            return await CallOrchestrator(session, _asterisk_client).create_conference(
+                source=request.source,
+                targets=request.targets,
+                mode=mode,
+                conference_id=conference_id,
+            )
+        return await CallService(session).initiate_conference(
+            source=request.source,
+            targets=request.targets,
+            mode=mode,
+            conference_id=conference_id,
+        )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Asterisk conference setup failed: {exc}") from exc
 
 
 async def _participant_action(call_id: str, extension: str, actor: str, action: str, session: AsyncSession) -> ParticipantStatus:
