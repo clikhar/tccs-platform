@@ -158,16 +158,35 @@ class AsteriskHttpClient:
                 raise
 
     async def cleanup_call(self, call_id: str, channel_id: str) -> None:
+        """Handle one StasisEnd without dropping a surviving conference.
+
+        A conference stays active while at least two mapped channels remain. Only
+        when the last conference leg has ended (or an individual call is reduced to
+        one leg) do we tear down the bridge and remaining channel state.
+        """
         call_key = str(call_id)
-        bridge_id = self._bridges.pop(call_key, None)
-        self._bridged_channels.pop(call_key, None)
-        self._bridge_locks.pop(call_key, None)
+        lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
+        async with lock:
+            channels = self._participants.get(call_key, {})
+            ended_channel = channels.pop(channel_id, None)
+            if ended_channel is None:
+                # The channel may already have been removed by an earlier cleanup.
+                ended_channel = channel_id
+            self._bridged_channels.get(call_key, set()).discard(ended_channel)
+
+            if len(channels) >= 2:
+                return
+
+            bridge_id = self._bridges.pop(call_key, None)
+            self._bridged_channels.pop(call_key, None)
+            remaining_channels = list(channels.values())
+            self._participants.pop(call_key, None)
+            self._bridge_locks.pop(call_key, None)
+
         if bridge_id:
             await self._safe_request("DELETE", f"/bridges/{bridge_id}")
-        channels = self._participants.pop(call_key, {})
-        for other_channel_id in channels.values():
-            if other_channel_id != channel_id:
-                await self._safe_request("DELETE", f"/channels/{other_channel_id}")
+        for other_channel_id in remaining_channels:
+            await self._safe_request("DELETE", f"/channels/{other_channel_id}")
 
     async def hangup(self, call_id: str) -> None:
         channel_id = call_id
