@@ -94,9 +94,10 @@ class AsteriskHttpClient:
     async def bridge_call(self, call_id: str, participant: str | None = None) -> None:
         """Bridge the source and a participant after that participant enters Stasis.
 
-        When participant is provided, only the source leg and that participant's
-        channel are submitted to ARI. This prevents a group call from attempting
-        to add a concurrently originating leg that has not entered Stasis yet.
+        When participant is provided, the source is added only if it is not already
+        in the bridge; later participants are added one at a time. This prevents a
+        group call from attempting to add a concurrently originating leg that has
+        not entered Stasis yet.
         """
         call_key = str(call_id)
         lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
@@ -125,18 +126,17 @@ class AsteriskHttpClient:
                     ]
                 else:
                     try:
-                        requested = [channels[participant]]
-                        source = next(
-                            channel_id
-                            for name, channel_id in channels.items()
-                            if name != participant
-                            and channel_id not in self._bridged_channels[call_key]
-                        )
-                        requested.insert(0, source)
-                    except (KeyError, StopIteration) as exc:
+                        participant_channel = channels[participant]
+                    except KeyError as exc:
                         raise AsteriskAdapterError(
                             f"participant {participant!r} is not mapped to call {call_key!r}"
                         ) from exc
+
+                    # originate() inserts the source first, so the first mapped
+                    # channel is the source. If it is already bridged, only add the
+                    # newly-arrived participant.
+                    source_channel = next(iter(channels.values()))
+                    requested = [source_channel, participant_channel]
                     pending = [
                         channel_id
                         for channel_id in requested
