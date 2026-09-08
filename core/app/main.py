@@ -35,7 +35,12 @@ async def lifespan(app: FastAPI):
             _asterisk_client = None
 
 
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+
+
+@app.get("/api/v1/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok", "service": settings.app_name, "version": settings.app_version}
 
 
 @app.get("/api/v1/health/live")
