@@ -48,6 +48,7 @@ class AsteriskHttpClient:
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = client is None
         self._participants: dict[str, dict[str, str]] = {}
+        self._channel_participants: dict[str, dict[str, str]] = {}
         self._bridges: dict[str, str] = {}
         self._bridged_channels: dict[str, set[str]] = {}
         self._bridge_locks: dict[str, asyncio.Lock] = {}
@@ -67,6 +68,7 @@ class AsteriskHttpClient:
         )
         channel_id = response.json()["id"]
         self._participants.setdefault(call_key, {})[source] = channel_id
+        self._channel_participants.setdefault(call_key, {})[channel_id] = source
         return channel_id
 
     async def originate_participant(self, call_id: str, participant: str) -> str:
@@ -89,6 +91,7 @@ class AsteriskHttpClient:
         )
         channel_id = response.json()["id"]
         self._participants.setdefault(call_key, {})[participant] = channel_id
+        self._channel_participants.setdefault(call_key, {})[channel_id] = participant
         return channel_id
 
     async def bridge_call(self, call_id: str, participant: str | None = None) -> None:
@@ -160,25 +163,31 @@ class AsteriskHttpClient:
         lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
         async with lock:
             channels = self._participants.get(call_key, {})
+            channel_participants = self._channel_participants.get(call_key, {})
 
-            # StasisEnd identifies the Asterisk channel, while _participants is
-            # keyed by participant extension. Remove the matching mapping by value.
-            participant_key = next(
-                (
-                    participant
-                    for participant, mapped_channel in channels.items()
-                    if mapped_channel == channel_id
-                ),
-                None,
-            )
+            # StasisEnd supplies the Asterisk channel identity. Keep a reverse map
+            # so cleanup never confuses a channel ID with a participant extension.
+            participant_key = channel_participants.pop(channel_id, None)
             if participant_key is not None:
                 channels.pop(participant_key, None)
+            else:
+                # Compatibility fallback for state created before reverse mapping
+                # was introduced: locate the participant by its mapped channel.
+                participant_key = next(
+                    (
+                        participant
+                        for participant, mapped_channel in channels.items()
+                        if mapped_channel == channel_id
+                    ),
+                    None,
+                )
+                if participant_key is not None:
+                    channels.pop(participant_key, None)
 
             bridged = self._bridged_channels.get(call_key)
             if bridged is not None:
                 bridged.discard(channel_id)
 
-            # The conference remains alive while two or more mapped legs remain.
             if len(channels) >= 2:
                 return
 
@@ -186,6 +195,7 @@ class AsteriskHttpClient:
             self._bridged_channels.pop(call_key, None)
             remaining_channels = list(channels.values())
             self._participants.pop(call_key, None)
+            self._channel_participants.pop(call_key, None)
             self._bridge_locks.pop(call_key, None)
 
         if bridge_id:
@@ -197,6 +207,7 @@ class AsteriskHttpClient:
         channel_id = call_id
         await self._request("DELETE", f"/channels/{channel_id}")
         self._participants.pop(str(call_id), None)
+        self._channel_participants.pop(str(call_id), None)
         self._bridges.pop(str(call_id), None)
         self._bridged_channels.pop(str(call_id), None)
         self._bridge_locks.pop(str(call_id), None)
@@ -212,8 +223,10 @@ class AsteriskHttpClient:
     async def remove_participant(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
         await self._request("DELETE", f"/channels/{channel_id}")
-        self._participants.get(str(call_id), {}).pop(participant, None)
-        self._bridged_channels.get(str(call_id), set()).discard(channel_id)
+        call_key = str(call_id)
+        self._participants.get(call_key, {}).pop(participant, None)
+        self._channel_participants.get(call_key, {}).pop(channel_id, None)
+        self._bridged_channels.get(call_key, set()).discard(channel_id)
 
     async def aclose(self) -> None:
         if self._owns_client:
