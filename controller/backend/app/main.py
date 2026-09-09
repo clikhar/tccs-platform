@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .asterisk import active_channel_details, endpoint_status
 from .ami import hangup_station_channel, mute_conference_channel
-from .calls import call_station
+from .calls import call_station, call_stations
 from .db import SessionLocal, get_db
 from .master import ensure_master_tables, require_admin, router as master_router
 from .models import Section, Station
@@ -224,6 +224,52 @@ async def controller_station_call(station_id: int, payload: dict = Body(default=
         INSERT INTO call_history (call_type, source_extension, target_station_id, target_station_number, target_name, group_code, status, originated_at)
         VALUES (:call_type, :source_extension, :target_station_id, :target_station_number, :target_name, :group_code, 'ORIGINATED', :originated_at)
     """), {"call_type": call_type, "source_extension": source_extension, "target_station_id": station.id, "target_station_number": station.station_number, "target_name": station.name, "group_code": group_code, "originated_at": datetime.now(timezone.utc)})
+    await db.commit()
+    return result
+
+@app.post("/api/v1/calls/conference")
+async def controller_conference_call(payload: dict = Body(...), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    """Create one Core conference for a controller and all requested stations."""
+    call_type = str(payload.get("call_type") or "GROUP").strip().upper()
+    if call_type not in {"GENERAL", "SECTION", "GROUP"}:
+        raise HTTPException(status_code=400, detail="Conference call_type must be GENERAL, SECTION or GROUP")
+    raw_targets = payload.get("target_extensions")
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise HTTPException(status_code=400, detail="target_extensions must contain at least one station")
+    targets = []
+    for value in raw_targets:
+        extension = str(value).strip()
+        if not re.fullmatch(r"10\d{2}", extension):
+            raise HTTPException(status_code=400, detail=f"Invalid station SIP extension: {extension}")
+        if extension not in targets:
+            targets.append(extension)
+    stations_result = await db.execute(select(Station).where(Station.enabled.is_(True), Station.sip_extension.in_(targets)))
+    station_rows = list(stations_result.scalars().all())
+    by_extension = {str(item.sip_extension): item for item in station_rows}
+    missing = [extension for extension in targets if extension not in by_extension]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Station(s) not found: {', '.join(missing)}")
+    for station in station_rows:
+        await _authorize_controller_station(station, user, db)
+    group_code = str(payload.get("group_code") or "").strip() or None
+    source_extension = str(payload.get("source_extension") or "").strip()
+    if not source_extension and user.get("controller_id"):
+        source = (await db.execute(text("SELECT sa.extension FROM controllers c JOIN sip_accounts sa ON sa.id=c.sip_account_id WHERE c.id=:id AND c.enabled=TRUE AND sa.enabled=TRUE LIMIT 1"), {"id": user["controller_id"]})).first()
+        source_extension = str(source.extension).strip() if source else ""
+    if not source_extension:
+        source_extension = "9999"
+    try:
+        result = await call_stations(targets, mode=call_type.lower(), group_code=group_code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    originated_at = datetime.now(timezone.utc)
+    for station in station_rows:
+        await db.execute(text("""
+            INSERT INTO call_history (call_type, source_extension, target_station_id, target_station_number, target_name, group_code, status, originated_at)
+            VALUES (:call_type, :source_extension, :target_station_id, :target_station_number, :target_name, :group_code, 'ORIGINATED', :originated_at)
+        """), {"call_type": call_type, "source_extension": source_extension, "target_station_id": station.id, "target_station_number": station.station_number, "target_name": station.name, "group_code": group_code, "originated_at": originated_at})
     await db.commit()
     return result
 
