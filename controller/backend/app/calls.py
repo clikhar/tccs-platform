@@ -66,8 +66,9 @@ async def call_station(extension: str, conference: str | None = None):
     if not re.fullmatch(r"10\d{2}", extension):
         raise ValueError("Invalid station SIP extension")
 
-    # When Stage 1 Core is configured, it owns call origination and ARI/media
-    # control. The Stage 2 controller remains the authenticated UI boundary.
+    # Stage 1 Core owns call origination and media control. The browser's
+    # registered controller endpoint is used as the source leg; the frontend
+    # answers the incoming INVITE and Core then bridges the station to it.
     if core_client.enabled:
         source = await controller_extension_for_station(extension)
         return await core_client.create_call(
@@ -88,3 +89,31 @@ async def call_station(extension: str, conference: str | None = None):
         response = await originate_to_conference(extension, target_conference)
         await db.commit()
         return response
+
+
+async def call_stations(
+    extensions: list[str],
+    *,
+    mode: str = "group",
+    group_code: str | None = None,
+) -> dict:
+    """Originate one controller source leg and attach multiple stations via Core."""
+    normalized = []
+    for extension in extensions:
+        value = str(extension).strip()
+        if not re.fullmatch(r"10\d{2}", value):
+            raise ValueError(f"Invalid station SIP extension: {value}")
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise ValueError("At least one station is required")
+    if not core_client.enabled:
+        raise RuntimeError("TCCS Core integration is required for multi-station calls")
+
+    source = await controller_extension_for_station(normalized[0])
+    return await core_client.create_conference(
+        source=source,
+        targets=normalized,
+        section_id=None,
+        mode=mode,
+    )
