@@ -14,9 +14,10 @@
 | RDSO clause | Requirement summary | Stage 1 component | Planned evidence | Status |
 |---|---|---|---|---|
 | 3.2 | Controller ↔ way-station communication with individual, group and general call; conference behavior | TCCS Core + Asterisk | SIP integration tests | PLANNED |
+| 3.2 — group-call behavior verified subset | Multi-target group call; one unreachable target does not block another target; three-party conference audio | TCCS Core + Asterisk | `verification/conference/GROUP_CALL_LIVE_2026-09-09.md` | VERIFIED |
 | 3.2.2 | Way station joins conference on handset lift | TCCS dialplan/call service | Lift-and-listen test | PLANNED |
 | 3.2.3 | Lift-and-listen, muted microphone, star-key toggle, controller conference behavior | TCCS Core + endpoint profile | DTMF/conference test | PLANNED |
-| 3.2.4 | On-hook removes participant | Asterisk conference adapter | Participant lifecycle test | PLANNED |
+| 3.2.4 | On-hook removes participant | Asterisk conference adapter | `verification/conference/GROUP_CALL_LIVE_2026-09-09.md` | VERIFIED |
 | 3.2.5 | Controller can mute/unmute/disconnect participant | Call-control API + Asterisk | Controller action integration test | PLANNED |
 | 3.3 | Multiple control sections and way stations | Section/group model | Multi-section test | PLANNED |
 | 3.4.1 | Visual call-status indications until answer and then conference | Event bus/API → Stage 2 | Event sequence test | PLANNED |
