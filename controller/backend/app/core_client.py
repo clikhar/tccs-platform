@@ -68,7 +68,8 @@ class TCCSCoreClient:
         }
         if section_id is not None:
             payload["section_id"] = str(section_id)
-        return await self._post("/api/v1/group-calls", payload)
+        endpoint = "/api/v1/general-calls" if str(mode).strip().lower() == "general" else "/api/v1/group-calls"
+        return await self._post(endpoint, payload)
 
 
 core_client = TCCSCoreClient()
