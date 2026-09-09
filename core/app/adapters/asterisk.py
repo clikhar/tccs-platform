@@ -155,29 +155,30 @@ class AsteriskHttpClient:
                 raise
 
     async def cleanup_call(self, call_id: str, channel_id: str) -> None:
-        """Handle one StasisEnd without dropping a surviving conference.
-
-        A conference stays active while at least two mapped channels remain. Only
-        when the last conference leg has ended (or an individual call is reduced to
-        one leg) do we tear down the bridge and remaining channel state.
-        """
+        """Handle one StasisEnd without dropping a surviving conference."""
         call_key = str(call_id)
         lock = self._bridge_locks.setdefault(call_key, asyncio.Lock())
         async with lock:
             channels = self._participants.get(call_key, {})
 
-            # _participants is keyed by extension/participant name, while StasisEnd
-            # gives us the Asterisk channel identity. Remove the matching leg by
-            # value, not by dictionary key.
+            # StasisEnd identifies the Asterisk channel, while _participants is
+            # keyed by participant extension. Remove the matching mapping by value.
             participant_key = next(
-                (participant for participant, mapped_channel in channels.items() if mapped_channel == channel_id),
+                (
+                    participant
+                    for participant, mapped_channel in channels.items()
+                    if mapped_channel == channel_id
+                ),
                 None,
             )
             if participant_key is not None:
                 channels.pop(participant_key, None)
 
-            self._bridged_channels.get(call_key, set()).discard(channel_id)
+            bridged = self._bridged_channels.get(call_key)
+            if bridged is not None:
+                bridged.discard(channel_id)
 
+            # The conference remains alive while two or more mapped legs remain.
             if len(channels) >= 2:
                 return
 
