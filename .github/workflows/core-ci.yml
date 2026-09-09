@@ -1,0 +1,55 @@
+name: TCCS Core CI
+
+on:
+  push:
+    branches: [main, stage1-foundation]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-core:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tccs
+          POSTGRES_PASSWORD: tccs
+          POSTGRES_DB: tccs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tccs -d tccs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: core/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Compile Python sources
+        run: python -m compileall -q app tests
+
+      - name: Apply database migrations
+        run: alembic upgrade head
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Build Core container
+        run: docker build -t tccs-core:ci .

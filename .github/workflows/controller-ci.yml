@@ -1,0 +1,70 @@
+name: TCCS Controller CI
+
+on:
+  push:
+    branches: [main, fix/core-ari-call-bridge]
+    paths:
+      - 'controller/backend/**'
+      - 'controller/frontend/**'
+      - '.github/workflows/controller-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'controller/backend/**'
+      - 'controller/frontend/**'
+      - '.github/workflows/controller-ci.yml'
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tccs
+          POSTGRES_PASSWORD: tccs
+          POSTGRES_DB: tccs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tccs -d tccs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: controller/backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: controller/backend/requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio
+      - name: Compile Python sources
+        run: python -m compileall -q app tests
+      - name: Run backend tests
+        env:
+          PYTHONPATH: .
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controller/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm install
+      - name: Build frontend
+        run: npm run build
