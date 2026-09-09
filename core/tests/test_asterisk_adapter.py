@@ -134,13 +134,14 @@ async def test_asterisk_adapter_keeps_conference_when_one_leg_ends() -> None:
 
     await adapter.cleanup_call(call_id, first_channel)
 
+    bridge_path = f"/ari/bridges/tccs-{call_id}"
     assert any(request.url.path == "/ari/bridges" for request in requests)
-    assert not any(request.url.path == "/ari/bridges/bridge-1" and request.method == "DELETE" for request in requests)
+    assert not any(request.url.path == bridge_path and request.method == "DELETE" for request in requests)
     assert not any(request.url.path == f"/ari/channels/{source_channel}" and request.method == "DELETE" for request in requests)
     assert not any(request.url.path == f"/ari/channels/{second_channel}" and request.method == "DELETE" for request in requests)
 
     await adapter.cleanup_call(call_id, second_channel)
-    assert any(request.url.path == "/ari/bridges/bridge-1" and request.method == "DELETE" for request in requests)
+    assert any(request.url.path == bridge_path and request.method == "DELETE" for request in requests)
     assert any(request.url.path == f"/ari/channels/{source_channel}" and request.method == "DELETE" for request in requests)
 
     await http_client.aclose()
