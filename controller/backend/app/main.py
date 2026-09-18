@@ -410,15 +410,26 @@ async def _core_participant_action(
     if not actor:
         actor = "9999"
 
+    extension = str(station.sip_extension).strip()
     try:
+        # Always prefer the authoritative active Core call for this participant.
+        # This prevents stale browser call IDs from controlling an ended call.
+        try:
+            authoritative_call_id = await core_client.active_call_for_participant(extension)
+            call_id = authoritative_call_id
+        except Exception as lookup_exc:
+            if "no active call" in str(lookup_exc).lower():
+                raise HTTPException(status_code=404, detail=str(lookup_exc)) from lookup_exc
         return await core_client.participant_action(
             call_id=call_id,
-            extension=str(station.sip_extension).strip(),
+            extension=extension,
             action=action,
             actor=actor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         status_code = 404 if "not in call" in str(exc).lower() else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
