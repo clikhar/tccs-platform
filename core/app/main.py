@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .adapters.asterisk import AsteriskAdapterError, AsteriskHttpClient
@@ -11,6 +12,7 @@ from .adapters.asterisk_event_processor import AsteriskEventProcessor
 from .adapters.asterisk_events import AsteriskEventStream
 from .config import settings
 from .db import check_database, close_database, get_db_session
+from .db_models import Call, CallParticipant
 from .models import CallRequest, CallStatus, ConferenceCallRequest, ParticipantActionRequest, ParticipantStatus
 from .services.call_orchestrator import CallOrchestrator
 from .services.call_service import CallService
@@ -98,6 +100,25 @@ async def create_call(request: CallRequest, session: AsyncSession = Depends(get_
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Asterisk call setup failed: {exc}") from exc
 
+
+@app.get("/api/v1/active-calls/participant/{extension}")
+async def active_call_for_participant(extension: str, session: AsyncSession = Depends(get_db_session)) -> dict:
+    value = str(extension).strip()
+    result = await session.execute(
+        select(CallParticipant.call_id)
+        .join(Call, Call.id == CallParticipant.call_id)
+        .where(
+            CallParticipant.extension == value,
+            CallParticipant.disconnected_at.is_(None),
+            Call.state.notin_(["ended", "failed"]),
+        )
+        .order_by(Call.started_at.desc())
+        .limit(1)
+    )
+    row = result.first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no active call for participant {value}")
+    return {"call_id": str(row.call_id)}
 
 @app.get("/api/v1/calls/{call_id}", response_model=CallStatus)
 async def get_call(call_id: str, session: AsyncSession = Depends(get_db_session)) -> CallStatus:
