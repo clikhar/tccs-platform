@@ -80,5 +80,22 @@ class TCCSCoreClient:
         endpoint = "/api/v1/general-calls" if str(mode).strip().lower() == "general" else "/api/v1/group-calls"
         return await self._post(endpoint, payload)
 
+    async def participant_action(
+        self,
+        *,
+        call_id: str,
+        extension: str,
+        action: str,
+        actor: str,
+    ) -> dict:
+        action_name = str(action).strip().lower()
+        if action_name not in {"connect", "mute", "unmute", "disconnect"}:
+            raise ValueError(f"Unsupported participant action: {action}")
+        endpoint_action = "disconnect" if action_name == "disconnect" else action_name
+        return await self._post(
+            f"/api/v1/calls/{str(call_id).strip()}/participants/{str(extension).strip()}/{endpoint_action}",
+            {"actor": str(actor).strip()},
+        )
+
 
 core_client = TCCSCoreClient()
