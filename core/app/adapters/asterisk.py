@@ -232,10 +232,14 @@ class AsteriskHttpClient:
 
     async def remove_channel(self, channel_id: str) -> None:
         await self._request("DELETE", f"/channels/{channel_id}")
-        call_key = str(call_id)
-        self._participants.get(call_key, {}).pop(participant, None)
-        self._channel_participants.get(call_key, {}).pop(channel_id, None)
-        self._bridged_channels.get(call_key, set()).discard(channel_id)
+        for call_key, channels in list(self._participants.items()):
+            participant = next((name for name, mapped in channels.items() if mapped == channel_id), None)
+            if participant is None:
+                continue
+            channels.pop(participant, None)
+            self._channel_participants.get(call_key, {}).pop(channel_id, None)
+            self._bridged_channels.get(call_key, set()).discard(channel_id)
+            break
 
     async def aclose(self) -> None:
         if self._owns_client:
