@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
+
+
+# Load the Controller-local environment file when the service is started
+# directly (for example with `uvicorn`). Deployment environments may still
+# provide TCCS_CORE_URL through the process environment; those values take
+# precedence over .env values.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 
 class CoreClientError(RuntimeError):
