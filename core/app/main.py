@@ -209,12 +209,31 @@ async def _participant_action(call_id: str, extension: str, actor: str, action: 
         if action in {"mute", "unmute", "remove"}:
             if _asterisk_client is None:
                 raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+
+            # Participant control must use the channel identity persisted from ARI
+            # events. The adapter's in-memory call/channel map is intentionally not
+            # authoritative because Core may restart while an Asterisk call survives.
+            result = await session.execute(
+                select(CallParticipant).where(
+                    CallParticipant.call_id == call_uuid,
+                    CallParticipant.extension == extension,
+                    CallParticipant.disconnected_at.is_(None),
+                )
+            )
+            participant = result.scalar_one_or_none()
+            if participant is None:
+                raise HTTPException(status_code=404, detail=f"participant {extension} is not active in call {call_id}")
+            channel_id = participant.asterisk_channel_id
+            if not channel_id:
+                raise HTTPException(status_code=409, detail=f"participant {extension} has no active Asterisk channel")
+
             if action == "mute":
-                await _asterisk_client.mute(call_id, extension)
+                await _asterisk_client.mute_channel(channel_id)
             elif action == "unmute":
-                await _asterisk_client.unmute(call_id, extension)
+                await _asterisk_client.unmute_channel(channel_id)
             else:
-                await _asterisk_client.remove_participant(call_id, extension)
+                await _asterisk_client.remove_channel(channel_id)
+
         await method(call_uuid, extension, actor)
     except HTTPException:
         raise
