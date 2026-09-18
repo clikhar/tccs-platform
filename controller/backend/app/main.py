@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .asterisk import active_channel_details, endpoint_status
 from .ami import hangup_station_channel, mute_conference_channel
 from .calls import call_station, call_stations
+from .core_client import core_client
 from .db import SessionLocal, get_db
 from .master import ensure_master_tables, require_admin, router as master_router
 from .models import Section, Station
