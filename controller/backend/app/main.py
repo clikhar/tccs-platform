@@ -349,6 +349,81 @@ async def controller_conference_call(payload: dict = Body(...), db: AsyncSession
     await db.commit()
     return result
 
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/connect")
+async def core_connect_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "connect")
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/mute")
+async def core_mute_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "mute")
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/unmute")
+async def core_unmute_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "unmute")
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/disconnect")
+async def core_disconnect_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "disconnect")
+
+
+async def _core_participant_action(
+    call_id: str,
+    participant: str,
+    payload: dict,
+    db: AsyncSession,
+    user: dict,
+    action: str,
+) -> dict:
+    if not core_client.enabled:
+        raise HTTPException(status_code=503, detail="TCCS Core integration is not configured")
+
+    value = str(participant).strip()
+    station = None
+    if re.fullmatch(r"10\d{2}", value):
+        result = await db.execute(select(Station).where(Station.enabled.is_(True), Station.sip_extension == value))
+        station = result.scalars().first()
+    else:
+        try:
+            station_id = int(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid participant")
+        station = await db.get(Station, station_id)
+
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+
+    await _authorize_controller_station(station, user, db)
+    actor = str(payload.get("actor") or "").strip()
+    if not actor and user.get("controller_id"):
+        row = (await db.execute(text("""
+            SELECT sa.extension
+            FROM controllers c
+            JOIN sip_accounts sa ON sa.id=c.sip_account_id
+            WHERE c.id=:id AND c.enabled=TRUE AND sa.enabled=TRUE
+            LIMIT 1
+        """), {"id": user["controller_id"]})).first()
+        actor = str(row.extension).strip() if row else ""
+    if not actor:
+        actor = "9999"
+
+    try:
+        return await core_client.participant_action(
+            call_id=call_id,
+            extension=str(station.sip_extension).strip(),
+            action=action,
+            actor=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        status_code = 404 if "not in call" in str(exc).lower() else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/conference/stations/{station_id}/hangup")
 async def conference_station_hangup(station_id: int, db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
     station = await db.get(Station, station_id)
