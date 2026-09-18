@@ -214,14 +214,23 @@ class AsteriskHttpClient:
 
     async def mute(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
-        await self._request("POST", f"/channels/{channel_id}/mute", params={"direction": "both"})
+        await self.mute_channel(channel_id)
 
     async def unmute(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
-        await self._request("DELETE", f"/channels/{channel_id}/mute", params={"direction": "both"})
+        await self.unmute_channel(channel_id)
 
     async def remove_participant(self, call_id: str, participant: str) -> None:
         channel_id = self._channel_for(call_id, participant)
+        await self.remove_channel(channel_id)
+
+    async def mute_channel(self, channel_id: str) -> None:
+        await self._request("POST", f"/channels/{channel_id}/mute", params={"direction": "both"})
+
+    async def unmute_channel(self, channel_id: str) -> None:
+        await self._request("DELETE", f"/channels/{channel_id}/mute", params={"direction": "both"})
+
+    async def remove_channel(self, channel_id: str) -> None:
         await self._request("DELETE", f"/channels/{channel_id}")
         call_key = str(call_id)
         self._participants.get(call_key, {}).pop(participant, None)
