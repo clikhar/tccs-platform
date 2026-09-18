@@ -80,6 +80,24 @@ class TCCSCoreClient:
         endpoint = "/api/v1/general-calls" if str(mode).strip().lower() == "general" else "/api/v1/group-calls"
         return await self._post(endpoint, payload)
 
+    async def active_call_for_participant(self, extension: str) -> str:
+        if not self.enabled:
+            raise CoreClientError("TCCS Core integration is not configured")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/active-calls/participant/{str(extension).strip()}"
+                )
+        except httpx.HTTPError as exc:
+            raise CoreClientError(f"TCCS Core unavailable: {exc}") from exc
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail")
+            except Exception:
+                detail = None
+            raise CoreClientError(detail or f"TCCS Core returned HTTP {response.status_code}")
+        return str(response.json()["call_id"])
+
     async def participant_action(
         self,
         *,
