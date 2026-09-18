@@ -99,6 +99,82 @@ async def sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
     result = await db.execute(select(Section).where(Section.enabled.is_(True)).order_by(Section.id))
     return list(result.scalars().all())
 
+@app.get("/api/v1/groups")
+async def controller_groups(
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(require_user),
+) -> list:
+    """Return enabled station groups available to the authenticated controller.
+
+    This is the operational/read-only group directory consumed by the
+    controller console. Administrator users see all enabled groups; controller
+    users see only groups assigned to their controller section.
+    """
+    query = """
+        SELECT
+            g.id,
+            g.code,
+            g.name,
+            g.section_id,
+            m.station_id AS member_station_id,
+            s.station_number,
+            s.name AS station_name,
+            s.sip_extension
+        FROM station_groups g
+        LEFT JOIN station_group_members m
+            ON m.station_group_id = g.id
+        LEFT JOIN stations s
+            ON s.id = m.station_id
+           AND s.enabled = TRUE
+        WHERE g.enabled = TRUE
+    """
+    params: dict = {}
+
+    if user.get("role") == "CONTROLLER":
+        controller_id = user.get("controller_id")
+        if not controller_id:
+            raise HTTPException(status_code=403, detail="Controller is not assigned")
+        query += """
+            AND g.section_id = (
+                SELECT section_id
+                FROM controllers
+                WHERE id = :controller_id
+                  AND enabled = TRUE
+            )
+        """
+        params["controller_id"] = controller_id
+
+    query += " ORDER BY g.name, s.station_number"
+
+    result = await db.execute(text(query), params)
+    groups: dict[int, dict] = {}
+
+    for row in result:
+        item = row._mapping
+        group_id = int(item["id"])
+        group = groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "code": item["code"],
+                "name": item["name"],
+                "section_id": item["section_id"],
+                "members": [],
+            },
+        )
+
+        if item["member_station_id"] is not None:
+            group["members"].append(
+                {
+                    "id": int(item["member_station_id"]),
+                    "station_number": item["station_number"],
+                    "name": item["station_name"],
+                    "sip_extension": item["sip_extension"],
+                }
+            )
+
+    return list(groups.values())
+
 @app.get("/api/v1/stations", response_model=List[StationOut])
 async def stations(db: AsyncSession = Depends(get_db)) -> List[Station]:
     result = await db.execute(select(Station).where(Station.enabled.is_(True)).order_by(Station.priority, Station.station_number))
