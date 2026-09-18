@@ -234,6 +234,9 @@ async def _participant_action(call_id: str, extension: str, actor: str, action: 
             else:
                 await _asterisk_client.remove_channel(channel_id)
 
+            # Close the read transaction before the service method opens its own.
+            await session.rollback()
+
         await method(call_uuid, extension, actor)
     except HTTPException:
         raise
