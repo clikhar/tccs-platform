@@ -85,6 +85,7 @@ async def test_controller_groups_returns_members_for_admin():
                     "id": 11,
                     "station_number": "102",
                     "name": "Station 102",
+                    "name": "Station 102",
                     "sip_extension": "1002",
                 },
             ],
@@ -98,6 +99,10 @@ async def test_controller_groups_returns_members_for_admin():
         },
     ]
     assert db.params == {}
+    sql = str(db.statement)
+    assert "g.id" in sql
+    assert "m.station_group_id = g.id" in sql
+    assert "g.station_group_id" not in sql
 
 
 @pytest.mark.asyncio
@@ -111,5 +116,6 @@ async def test_controller_groups_scopes_controller_to_assigned_section():
 
     assert result == []
     assert db.params == {"controller_id": 7}
-    assert "g.section_id" in str(db.statement)
-    assert "controllers" in str(db.statement)
+    sql = str(db.statement)
+    assert "g.section_id" in sql
+    assert "controllers" in sql
