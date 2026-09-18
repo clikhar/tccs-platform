@@ -85,7 +85,6 @@ async def test_controller_groups_returns_members_for_admin():
                     "id": 11,
                     "station_number": "102",
                     "name": "Station 102",
-                    "name": "Station 102",
                     "sip_extension": "1002",
                 },
             ],
