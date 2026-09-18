@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .adapters.asterisk import AsteriskHttpClient
+from .adapters.asterisk import AsteriskAdapterError, AsteriskHttpClient
 from .adapters.asterisk_event_processor import AsteriskEventProcessor
 from .adapters.asterisk_events import AsteriskEventStream
 from .config import settings
@@ -185,7 +185,20 @@ async def _participant_action(call_id: str, extension: str, actor: str, action: 
     service = CallService(session)
     method = {"connect": service.connect_participant, "mute": service.mute_participant, "unmute": service.unmute_participant, "remove": service.remove_participant}[action]
     try:
+        if action in {"mute", "unmute", "remove"}:
+            if _asterisk_client is None:
+                raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+            if action == "mute":
+                await _asterisk_client.mute(call_id, extension)
+            elif action == "unmute":
+                await _asterisk_client.unmute(call_id, extension)
+            else:
+                await _asterisk_client.remove_participant(call_id, extension)
         await method(call_uuid, extension, actor)
+    except HTTPException:
+        raise
+    except AsteriskAdapterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         status = 404 if "not in call" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
