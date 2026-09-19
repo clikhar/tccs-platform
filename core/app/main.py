@@ -110,6 +110,11 @@ async def active_call_for_participant(extension: str, session: AsyncSession = De
         .where(
             CallParticipant.extension == value,
             CallParticipant.disconnected_at.is_(None),
+            # A participant is actionable only after ARI has persisted the
+            # actual Asterisk channel identity. Conference rows are created
+            # before their target legs enter Stasis, so unstarted participants
+            # must never be treated as an active call.
+            CallParticipant.asterisk_channel_id.is_not(None),
             Call.state.notin_(["ended", "failed"]),
         )
         .order_by(Call.started_at.desc())
