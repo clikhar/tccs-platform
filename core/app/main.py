@@ -105,7 +105,7 @@ async def create_call(request: CallRequest, session: AsyncSession = Depends(get_
 async def active_call_for_participant(extension: str, session: AsyncSession = Depends(get_db_session)) -> dict:
     value = str(extension).strip()
     result = await session.execute(
-        select(CallParticipant.call_id)
+        select(CallParticipant)
         .join(Call, Call.id == CallParticipant.call_id)
         .where(
             CallParticipant.extension == value,
@@ -118,22 +118,26 @@ async def active_call_for_participant(extension: str, session: AsyncSession = De
             Call.state.notin_(["ended", "failed"]),
         )
         .order_by(Call.started_at.desc())
-        .limit(1)
     )
-    rows = result.fetchall()
-    if not rows:
+    participants = result.scalars().all()
+    if not participants:
         raise HTTPException(status_code=404, detail=f"no active call for participant {value}")
 
     # DB channel IDs can become stale if Core misses a StasisEnd or is
     # restarted while Asterisk remains in service. Only advertise a call to
-    # Controller when the participant still has a live ARI channel.
+    # Controller when the persisted channel is still live in ARI.
     if _asterisk_client is None:
         raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
 
-    for row in rows:
-        live_channel = await _asterisk_client.find_active_channel(str(row.call_id), value)
+    for participant in participants:
+        channel_id = participant.asterisk_channel_id
+        if not channel_id:
+            continue
+        live_channel = await _asterisk_client.find_active_channel(
+            str(participant.call_id), value, channel_id
+        )
         if live_channel:
-            return {"call_id": str(row.call_id)}
+            return {"call_id": str(participant.call_id)}
 
     raise HTTPException(status_code=404, detail=f"no live Asterisk call for participant {value}")
 
