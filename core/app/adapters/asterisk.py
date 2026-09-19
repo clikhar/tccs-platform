@@ -230,6 +230,16 @@ class AsteriskHttpClient:
     async def unmute_channel(self, channel_id: str) -> None:
         await self._request("DELETE", f"/channels/{channel_id}/mute", params={"direction": "both"})
 
+    async def find_active_channel(self, call_id: str, participant: str) -> str | None:
+        """Find the live ARI channel for a participant after a stale DB mapping."""
+        call_key = str(call_id)
+        expected = f"callee,{call_key},{participant}"
+        response = await self._request("GET", "/channels")
+        for channel in response.json():
+            if str(channel.get("dialplan", {}).get("app_data", "")) == expected:
+                return str(channel["id"])
+        return None
+
     async def remove_channel(self, channel_id: str) -> None:
         await self._request("DELETE", f"/channels/{channel_id}")
         for call_key, channels in list(self._participants.items()):
