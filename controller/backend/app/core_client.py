@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
+
+
+# Load the Controller-local environment file when the service is started
+# directly (for example with `uvicorn`). Deployment environments may still
+# provide TCCS_CORE_URL through the process environment; those values take
+# precedence over .env values.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 
 class CoreClientError(RuntimeError):
@@ -70,6 +79,41 @@ class TCCSCoreClient:
             payload["section_id"] = str(section_id)
         endpoint = "/api/v1/general-calls" if str(mode).strip().lower() == "general" else "/api/v1/group-calls"
         return await self._post(endpoint, payload)
+
+    async def active_call_for_participant(self, extension: str) -> str:
+        if not self.enabled:
+            raise CoreClientError("TCCS Core integration is not configured")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/active-calls/participant/{str(extension).strip()}"
+                )
+        except httpx.HTTPError as exc:
+            raise CoreClientError(f"TCCS Core unavailable: {exc}") from exc
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail")
+            except Exception:
+                detail = None
+            raise CoreClientError(detail or f"TCCS Core returned HTTP {response.status_code}")
+        return str(response.json()["call_id"])
+
+    async def participant_action(
+        self,
+        *,
+        call_id: str,
+        extension: str,
+        action: str,
+        actor: str,
+    ) -> dict:
+        action_name = str(action).strip().lower()
+        if action_name not in {"connect", "mute", "unmute", "disconnect"}:
+            raise ValueError(f"Unsupported participant action: {action}")
+        endpoint_action = "disconnect" if action_name == "disconnect" else action_name
+        return await self._post(
+            f"/api/v1/calls/{str(call_id).strip()}/participants/{str(extension).strip()}/{endpoint_action}",
+            {"actor": str(actor).strip()},
+        )
 
 
 core_client = TCCSCoreClient()
