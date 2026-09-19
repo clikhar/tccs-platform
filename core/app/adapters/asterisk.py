@@ -233,10 +233,16 @@ class AsteriskHttpClient:
     async def find_active_channel(self, call_id: str, participant: str) -> str | None:
         """Find the live ARI channel for a participant after a stale DB mapping."""
         call_key = str(call_id)
-        expected = f"callee,{call_key},{participant}"
+        expected_args = f"callee,{call_key},{participant}"
+        expected_app_data = f"{self._app},{expected_args}"
+        expected_endpoint = f"PJSIP/{participant}"
         response = await self._request("GET", "/channels")
         for channel in response.json():
-            if str(channel.get("dialplan", {}).get("app_data", "")) == expected:
+            app_data = str(channel.get("dialplan", {}).get("app_data", ""))
+            channel_name = str(channel.get("name", ""))
+            if app_data == expected_app_data or (
+                app_data.endswith("," + expected_args) and channel_name.startswith(expected_endpoint + "-")
+            ):
                 return str(channel["id"])
         return None
 
