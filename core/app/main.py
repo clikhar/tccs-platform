@@ -232,12 +232,35 @@ async def _participant_action(call_id: str, extension: str, actor: str, action: 
             if not channel_id:
                 raise HTTPException(status_code=409, detail=f"participant {extension} has no active Asterisk channel")
 
-            if action == "mute":
-                await _asterisk_client.mute_channel(channel_id)
-            elif action == "unmute":
-                await _asterisk_client.unmute_channel(channel_id)
-            else:
-                await _asterisk_client.remove_channel(channel_id)
+            try:
+                if action == "mute":
+                    await _asterisk_client.mute_channel(channel_id)
+                elif action == "unmute":
+                    await _asterisk_client.unmute_channel(channel_id)
+                else:
+                    await _asterisk_client.remove_channel(channel_id)
+            except AsteriskAdapterError as exc:
+                # A Core restart or a missed StasisEnd can leave a stale
+                # channel ID in the DB. Reconcile it against the live ARI
+                # channel list and retry the requested operation once.
+                if "HTTP 404" not in str(exc):
+                    raise
+                recovered_channel = await _asterisk_client.find_active_channel(call_uuid, extension)
+                if not recovered_channel:
+                    raise
+                await session.rollback()
+                async with session.begin():
+                    refreshed = await session.get(CallParticipant, participant.id)
+                    if refreshed is None or refreshed.disconnected_at is not None:
+                        raise HTTPException(status_code=404, detail=f"participant {extension} is no longer active")
+                    refreshed.asterisk_channel_id = recovered_channel
+                channel_id = recovered_channel
+                if action == "mute":
+                    await _asterisk_client.mute_channel(channel_id)
+                elif action == "unmute":
+                    await _asterisk_client.unmute_channel(channel_id)
+                else:
+                    await _asterisk_client.remove_channel(channel_id)
 
             # Close the read transaction before the service method opens its own.
             await session.rollback()
