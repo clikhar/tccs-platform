@@ -25,6 +25,10 @@ class AsteriskClient(Protocol):
 
     async def remove_participant(self, call_id: str, participant: str) -> None: ...
 
+    async def find_active_channel(
+        self, call_id: str, participant: str, channel_id: str | None = None
+    ) -> str | None: ...
+
 
 class AsteriskAdapterError(RuntimeError):
     """Raised when Asterisk rejects an ARI operation."""
@@ -230,20 +234,39 @@ class AsteriskHttpClient:
     async def unmute_channel(self, channel_id: str) -> None:
         await self._request("DELETE", f"/channels/{channel_id}/mute", params={"direction": "both"})
 
-    async def find_active_channel(self, call_id: str, participant: str) -> str | None:
-        """Find the live ARI channel for a participant after a stale DB mapping."""
-        call_key = str(call_id)
-        expected_args = f"callee,{call_key},{participant}"
-        expected_app_data = f"{self._app},{expected_args}"
-        expected_endpoint = f"PJSIP/{participant}"
-        response = await self._request("GET", "/channels")
-        for channel in response.json():
-            app_data = str(channel.get("dialplan", {}).get("app_data", ""))
-            channel_name = str(channel.get("name", ""))
-            if app_data == expected_app_data or (
-                app_data.endswith("," + expected_args) and channel_name.startswith(expected_endpoint + "-")
-            ):
+    async def find_active_channel(
+        self, call_id: str, participant: str, channel_id: str | None = None
+    ) -> str | None:
+        """Find a live ARI channel without relying on Stasis app arguments.
+
+        Asterisk's ARI Channel model does not expose the Stasis appArgs used
+        when the channel was originated. Core therefore reconciles a persisted
+        channel ID directly when one is available. The fallback endpoint match is
+        intentionally conservative and only succeeds when exactly one live
+        channel exists for the participant.
+        """
+        expected_endpoint = f"PJSIP/{participant}-"
+
+        if channel_id:
+            try:
+                response = await self._request("GET", f"/channels/{channel_id}")
+            except AsteriskAdapterError as exc:
+                if "HTTP 404" in str(exc):
+                    return None
+                raise
+            channel = response.json()
+            if str(channel.get("name", "")).startswith(expected_endpoint):
                 return str(channel["id"])
+            return None
+
+        response = await self._request("GET", "/channels")
+        matches = [
+            str(channel["id"])
+            for channel in response.json()
+            if str(channel.get("name", "")).startswith(expected_endpoint)
+        ]
+        if len(matches) == 1:
+            return matches[0]
         return None
 
     async def remove_channel(self, channel_id: str) -> None:
