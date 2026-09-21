@@ -161,6 +161,50 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
     status = await CallService(session).active_call_for_source(value)
     if status is None:
         raise HTTPException(status_code=404, detail=f"no active call for source {value}")
+
+    # PostgreSQL call state is not sufficient to declare a call active. A
+    # previous Core restart can leave an orphaned DB row after Asterisk has
+    # already destroyed the controller channel. Never route a new station
+    # into such an orphaned call.
+    if _asterisk_client is not None:
+        live_source_channel = await _asterisk_client.find_active_channel(
+            status.call_id,
+            value,
+            None,
+        )
+        if not live_source_channel:
+            call_uuid = _parse_call_id(status.call_id)
+            await session.rollback()
+            async with session.begin():
+                call = await session.get(Call, call_uuid)
+                if call is not None and call.state not in {
+                    CallState.ENDED.value,
+                    CallState.FAILED.value,
+                }:
+                    call.state = CallState.ENDED.value
+                    call.ended_at = datetime.now(timezone.utc)
+                    result = await session.execute(
+                        select(CallParticipant).where(
+                            CallParticipant.call_id == call_uuid,
+                            CallParticipant.disconnected_at.is_(None),
+                        )
+                    )
+                    for participant in result.scalars():
+                        participant.disconnected_at = datetime.now(timezone.utc)
+                        participant.asterisk_channel_id = None
+            raise HTTPException(
+                status_code=404,
+                detail=f"no live Asterisk call for source {value}",
+            )
+
+        # Rehydrate the adapter mapping so a subsequent participant originate
+        # does not depend on Core process lifetime.
+        await _asterisk_client.attach_participant_channel(
+            status.call_id,
+            value,
+            live_source_channel,
+        )
+
     return {"call_id": status.call_id, "conference_id": status.conference_id}
 
 @app.get("/api/v1/active-conferences/source/{extension}")
