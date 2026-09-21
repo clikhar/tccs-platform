@@ -172,7 +172,37 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
             value,
             None,
         )
-        if not live_source_channel:
+
+        # For an individual call, the controller channel alone is NOT enough
+        # to consider the call active. The target station may already have
+        # rejected/hung up, while the controller leg is still briefly alive.
+        # If we return this stale call, the next 9999 -> station attempt is
+        # incorrectly routed into the old call and never originates a fresh
+        # target leg.
+        live_target_channel = None
+        if live_source_channel and status.conference_id is None:
+            participants_result = await session.execute(
+                select(CallParticipant).where(
+                    CallParticipant.call_id == _parse_call_id(status.call_id),
+                    CallParticipant.role == "participant",
+                    CallParticipant.disconnected_at.is_(None),
+                )
+            )
+            target_participants = participants_result.scalars().all()
+            await session.rollback()
+
+            for target_participant in target_participants:
+                live_target_channel = await _asterisk_client.find_active_channel(
+                    status.call_id,
+                    target_participant.extension,
+                    target_participant.asterisk_channel_id,
+                )
+                if live_target_channel:
+                    break
+
+        if not live_source_channel or (
+            status.conference_id is None and not live_target_channel
+        ):
             call_uuid = _parse_call_id(status.call_id)
             await session.rollback()
             async with session.begin():
@@ -192,9 +222,19 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
                     for participant in result.scalars():
                         participant.disconnected_at = datetime.now(timezone.utc)
                         participant.asterisk_channel_id = None
+
+            # The source channel can still be alive for a short time after the
+            # target rejects. Explicitly release it so SIP.js returns to the
+            # REGISTERED state before the next outbound attempt.
+            if live_source_channel:
+                try:
+                    await _asterisk_client.remove_channel(live_source_channel)
+                except Exception:
+                    pass
+
             raise HTTPException(
                 status_code=404,
-                detail=f"no live Asterisk call for source {value}",
+                detail=f"no live active call for source {value}",
             )
 
         # Rehydrate the adapter mapping so a subsequent participant originate
