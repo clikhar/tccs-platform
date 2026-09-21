@@ -72,8 +72,36 @@ async def ensure_master_tables(db: AsyncSession) -> None:
     await db.execute(text("""CREATE TABLE IF NOT EXISTS station_types (id BIGSERIAL PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, priority INTEGER NOT NULL DEFAULT 100)"""))
     await db.execute(text("""CREATE TABLE IF NOT EXISTS admin_users (id BIGSERIAL PRIMARY KEY, username VARCHAR(64) NOT NULL UNIQUE, password_hash VARCHAR(512) NOT NULL, role VARCHAR(32) NOT NULL DEFAULT 'ADMIN', enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"""))
     await db.execute(text("""CREATE TABLE IF NOT EXISTS controllers (id BIGSERIAL PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, section_id BIGINT REFERENCES sections(id), enabled BOOLEAN NOT NULL DEFAULT TRUE)"""))
-    await db.execute(text("""CREATE TABLE IF NOT EXISTS station_groups (station_group_id BIGSERIAL PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, section_id BIGINT REFERENCES sections(id), enabled BOOLEAN NOT NULL DEFAULT TRUE)"""))
-    await db.execute(text("""CREATE TABLE IF NOT EXISTS station_group_members (station_group_id BIGINT NOT NULL REFERENCES station_groups(station_group_id) ON DELETE CASCADE, station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE, PRIMARY KEY(station_group_id, station_id))"""))
+
+    # Canonical schema uses station_groups.id and station_group_members.group_id.
+    # Older controller databases used station_group_id for both columns. Normalize
+    # that legacy shape before any group queries or writes are executed.
+    group_columns = {
+        str(row.column_name)
+        for row in (await db.execute(text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'station_groups'
+        """))).all()
+    }
+    if "station_group_id" in group_columns and "id" not in group_columns:
+        await db.execute(text("ALTER TABLE station_groups RENAME COLUMN station_group_id TO id"))
+
+    member_columns = {
+        str(row.column_name)
+        for row in (await db.execute(text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'station_group_members'
+        """))).all()
+    }
+    if "station_group_id" in member_columns and "group_id" not in member_columns:
+        await db.execute(text("ALTER TABLE station_group_members RENAME COLUMN station_group_id TO group_id"))
+
+    await db.execute(text("""CREATE TABLE IF NOT EXISTS station_groups (id BIGSERIAL PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, section_id BIGINT REFERENCES sections(id), enabled BOOLEAN NOT NULL DEFAULT TRUE)"""))
+    await db.execute(text("""CREATE TABLE IF NOT EXISTS station_group_members (group_id BIGINT NOT NULL REFERENCES station_groups(id) ON DELETE CASCADE, station_id BIGINT NOT NULL REFERENCES stations(id) ON DELETE CASCADE, PRIMARY KEY(group_id, station_id))"""))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_station_types_enabled ON station_types(enabled)"))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users(username)"))
     await db.execute(text("CREATE INDEX IF NOT EXISTS idx_controllers_section ON controllers(section_id)"))
@@ -197,13 +225,13 @@ async def delete_controller(controller_id:int,db:AsyncSession=Depends(get_db),ad
 
 @router.get("/station-groups")
 async def master_station_groups(db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
-    result=await db.execute(text("""SELECT g.id,g.code,g.name,g.section_id,g.enabled,s.code AS section_code,s.name AS section_name,COUNT(m.station_id) AS member_count FROM station_groups g LEFT JOIN sections s ON s.id=g.section_id LEFT JOIN station_group_members m ON m.station_group_id=g.id GROUP BY g.id,g.code,g.name,g.section_id,g.enabled,s.code,s.name ORDER BY g.code""")); return [dict(row._mapping) for row in result]
+    result=await db.execute(text("""SELECT g.id,g.code,g.name,g.section_id,g.enabled,s.code AS section_code,s.name AS section_name,COUNT(m.station_id) AS member_count FROM station_groups g LEFT JOIN sections s ON s.id=g.section_id LEFT JOIN station_group_members m ON m.group_id=g.id GROUP BY g.id,g.code,g.name,g.section_id,g.enabled,s.code,s.name ORDER BY g.code""")); return [dict(row._mapping) for row in result]
 
 @router.get("/station-groups/{group_id}/members")
 async def station_group_members(group_id:int,db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
     exists=(await db.execute(text("SELECT id FROM station_groups WHERE id=:id"),{"id":group_id})).first()
     if exists is None: raise HTTPException(status_code=404,detail="Station group not found")
-    result=await db.execute(text("""SELECT s.id,s.station_number,s.name,s.location,s.section_id,s.sip_extension,s.station_type,s.enabled FROM station_group_members m JOIN stations s ON s.id=m.station_id WHERE m.station_group_id=:id ORDER BY s.station_number"""),{"id":group_id}); return [dict(row._mapping) for row in result]
+    result=await db.execute(text("""SELECT s.id,s.station_number,s.name,s.location,s.section_id,s.sip_extension,s.station_type,s.enabled FROM station_group_members m JOIN stations s ON s.id=m.station_id WHERE m.group_id=:id ORDER BY s.station_number"""),{"id":group_id}); return [dict(row._mapping) for row in result]
 
 @router.post("/station-groups")
 async def create_station_group(payload:dict=Body(...),db:AsyncSession=Depends(get_db),admin:dict=Depends(require_admin)):
@@ -250,8 +278,8 @@ async def set_station_group_members(group_id:int,payload:dict=Body(...),db:Async
     if station_ids:
         result=await db.execute(text("SELECT id FROM stations WHERE id = ANY(:ids)"),{"ids":station_ids}); found={int(r.id) for r in result}; missing=[x for x in station_ids if x not in found]
         if missing: raise HTTPException(status_code=400,detail=f"Station(s) not found: {', '.join(map(str,missing))}")
-    await db.execute(text("DELETE FROM station_group_members WHERE station_group_id=:id"),{"id":group_id})
-    for station_id in station_ids: await db.execute(text("INSERT INTO station_group_members(station_group_id,station_id) VALUES(:gid,:sid) ON CONFLICT DO NOTHING"),{"gid":group_id,"sid":station_id})
+    await db.execute(text("DELETE FROM station_group_members WHERE group_id=:id"),{"id":group_id})
+    for station_id in station_ids: await db.execute(text("INSERT INTO station_group_members(group_id,station_id) VALUES(:gid,:sid) ON CONFLICT DO NOTHING"),{"gid":group_id,"sid":station_id})
     await db.commit(); return {"status":"UPDATED","group_id":group_id,"station_ids":station_ids,"member_count":len(station_ids)}
 
 @router.delete("/station-groups/{group_id}")

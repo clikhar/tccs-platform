@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .asterisk import active_channel_details, endpoint_status
 from .ami import hangup_station_channel, mute_conference_channel
 from .calls import call_station, call_stations
+from .core_client import core_client
 from .db import SessionLocal, get_db
 from .master import ensure_master_tables, require_admin, router as master_router
 from .models import Section, Station
@@ -98,6 +99,82 @@ async def health() -> dict:
 async def sections(db: AsyncSession = Depends(get_db)) -> List[Section]:
     result = await db.execute(select(Section).where(Section.enabled.is_(True)).order_by(Section.id))
     return list(result.scalars().all())
+
+@app.get("/api/v1/groups")
+async def controller_groups(
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(require_user),
+) -> list:
+    """Return enabled station groups available to the authenticated controller.
+
+    This is the operational/read-only group directory consumed by the
+    controller console. Administrator users see all enabled groups; controller
+    users see only groups assigned to their controller section.
+    """
+    query = """
+        SELECT
+            g.id,
+            g.code,
+            g.name,
+            g.section_id,
+            m.station_id AS member_station_id,
+            s.station_number,
+            s.name AS station_name,
+            s.sip_extension
+        FROM station_groups g
+        LEFT JOIN station_group_members m
+            ON m.group_id = g.id
+        LEFT JOIN stations s
+            ON s.id = m.station_id
+           AND s.enabled = TRUE
+        WHERE g.enabled = TRUE
+    """
+    params: dict = {}
+
+    if user.get("role") == "CONTROLLER":
+        controller_id = user.get("controller_id")
+        if not controller_id:
+            raise HTTPException(status_code=403, detail="Controller is not assigned")
+        query += """
+            AND g.section_id = (
+                SELECT section_id
+                FROM controllers
+                WHERE id = :controller_id
+                  AND enabled = TRUE
+            )
+        """
+        params["controller_id"] = controller_id
+
+    query += " ORDER BY g.name, s.station_number"
+
+    result = await db.execute(text(query), params)
+    groups: dict[int, dict] = {}
+
+    for row in result:
+        item = row._mapping
+        group_id = int(item["id"])
+        group = groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "code": item["code"],
+                "name": item["name"],
+                "section_id": item["section_id"],
+                "members": [],
+            },
+        )
+
+        if item["member_station_id"] is not None:
+            group["members"].append(
+                {
+                    "id": int(item["member_station_id"]),
+                    "station_number": item["station_number"],
+                    "name": item["station_name"],
+                    "sip_extension": item["sip_extension"],
+                }
+            )
+
+    return list(groups.values())
 
 @app.get("/api/v1/stations", response_model=List[StationOut])
 async def stations(db: AsyncSession = Depends(get_db)) -> List[Station]:
@@ -272,6 +349,141 @@ async def controller_conference_call(payload: dict = Body(...), db: AsyncSession
         """), {"call_type": call_type, "source_extension": source_extension, "target_station_id": station.id, "target_station_number": station.station_number, "target_name": station.name, "group_code": group_code, "originated_at": originated_at})
     await db.commit()
     return result
+
+
+@app.get("/api/v1/active-calls/participant/{participant}")
+async def controller_active_call_for_participant(
+    participant: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(require_user),
+) -> dict:
+    """Resolve the live Core call for a station/SIP participant.
+
+    The frontend may discover a call that was established before the page loaded,
+    so it must not depend on a browser-held call ID. Core remains authoritative.
+    """
+    value = str(participant).strip()
+    station = await _resolve_station_participant(value, db)
+
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    await _authorize_controller_station(station, user, db)
+
+    if not core_client.enabled:
+        raise HTTPException(status_code=503, detail="TCCS Core integration is not configured")
+    try:
+        call_id = await core_client.active_call_for_participant(str(station.sip_extension).strip())
+        return {"call_id": call_id, "extension": str(station.sip_extension).strip()}
+    except Exception as exc:
+        detail = str(exc)
+        if "no active call" in detail.lower() or "no live asterisk call" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=502, detail=detail) from exc
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/connect")
+async def core_connect_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "connect")
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/mute")
+async def core_mute_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "mute")
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/unmute")
+async def core_unmute_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "unmute")
+
+
+@app.post("/api/v1/calls/{call_id}/participants/{participant}/disconnect")
+async def core_disconnect_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
+    return await _core_participant_action(call_id, participant, payload, db, user, "disconnect")
+
+
+async def _resolve_station_participant(value: str, db: AsyncSession) -> Station | None:
+    """Resolve a controller participant by station number, SIP extension, or DB id.
+
+    The frontend uses station numbers as participant IDs, while Core control
+    operates on SIP extensions. Station number must therefore be checked before
+    treating a numeric value as a database primary key.
+    """
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+
+    result = await db.execute(
+        select(Station).where(
+            Station.enabled.is_(True),
+            (Station.station_number == normalized) | (Station.sip_extension == normalized),
+        )
+    )
+    station = result.scalars().first()
+    if station is not None:
+        return station
+
+    if normalized.isdigit():
+        return await db.get(Station, int(normalized))
+    return None
+
+
+async def _core_participant_action(
+    call_id: str,
+    participant: str,
+    payload: dict,
+    db: AsyncSession,
+    user: dict,
+    action: str,
+) -> dict:
+    if not core_client.enabled:
+        raise HTTPException(status_code=503, detail="TCCS Core integration is not configured")
+
+    value = str(participant).strip()
+    station = await _resolve_station_participant(value, db)
+
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+
+    await _authorize_controller_station(station, user, db)
+    actor = str(payload.get("actor") or "").strip()
+    if not actor and user.get("controller_id"):
+        row = (await db.execute(text("""
+            SELECT sa.extension
+            FROM controllers c
+            JOIN sip_accounts sa ON sa.id=c.sip_account_id
+            WHERE c.id=:id AND c.enabled=TRUE AND sa.enabled=TRUE
+            LIMIT 1
+        """), {"id": user["controller_id"]})).first()
+        actor = str(row.extension).strip() if row else ""
+    if not actor:
+        actor = "9999"
+
+    extension = str(station.sip_extension).strip()
+    try:
+        # Always prefer the authoritative active Core call for this participant.
+        # This prevents stale browser call IDs from controlling an ended call.
+        try:
+            authoritative_call_id = await core_client.active_call_for_participant(extension)
+            call_id = authoritative_call_id
+        except Exception as lookup_exc:
+            detail = str(lookup_exc)
+            if "no active call" in detail.lower() or "no live asterisk call" in detail.lower():
+                raise HTTPException(status_code=404, detail=detail) from lookup_exc
+            raise
+        return await core_client.participant_action(
+            call_id=call_id,
+            extension=extension,
+            action=action,
+            actor=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        status_code = 404 if "not in call" in str(exc).lower() else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
 
 @app.post("/api/v1/conference/stations/{station_id}/hangup")
 async def conference_station_hangup(station_id: int, db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:

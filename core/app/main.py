@@ -4,13 +4,15 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .adapters.asterisk import AsteriskHttpClient
+from .adapters.asterisk import AsteriskAdapterError, AsteriskHttpClient
 from .adapters.asterisk_event_processor import AsteriskEventProcessor
 from .adapters.asterisk_events import AsteriskEventStream
 from .config import settings
 from .db import check_database, close_database, get_db_session
+from .db_models import Call, CallParticipant
 from .models import CallRequest, CallStatus, ConferenceCallRequest, ParticipantActionRequest, ParticipantStatus
 from .services.call_orchestrator import CallOrchestrator
 from .services.call_service import CallService
@@ -99,6 +101,60 @@ async def create_call(request: CallRequest, session: AsyncSession = Depends(get_
         raise HTTPException(status_code=502, detail=f"Asterisk call setup failed: {exc}") from exc
 
 
+@app.get("/api/v1/active-calls/participant/{extension}")
+async def active_call_for_participant(extension: str, session: AsyncSession = Depends(get_db_session)) -> dict:
+    value = str(extension).strip()
+    result = await session.execute(
+        select(CallParticipant)
+        .join(Call, Call.id == CallParticipant.call_id)
+        .where(
+            CallParticipant.extension == value,
+            CallParticipant.role == "participant",
+            CallParticipant.disconnected_at.is_(None),
+            # A participant is actionable only after ARI has persisted the
+            # actual Asterisk channel identity. Conference rows are created
+            # before their target legs enter Stasis, so unstarted participants
+            # must never be treated as an active call.
+            CallParticipant.asterisk_channel_id.is_not(None),
+            Call.state.notin_(["ended", "failed"]),
+        )
+        .order_by(Call.started_at.desc())
+    )
+    participants = result.scalars().all()
+    if not participants:
+        raise HTTPException(status_code=404, detail=f"no active call for participant {value}")
+
+    # DB channel IDs can become stale if Core misses a StasisEnd or is
+    # restarted while Asterisk remains in service. Only advertise a call to
+    # Controller when the persisted channel is still live in ARI.
+    if _asterisk_client is None:
+        raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+
+    for participant in participants:
+        channel_id = participant.asterisk_channel_id
+        live_channel = None
+        if channel_id:
+            live_channel = await _asterisk_client.find_active_channel(
+                str(participant.call_id), value, channel_id
+            )
+        # If the persisted channel is missing/stale, reconcile against the live
+        # endpoint. This covers a missed StasisStart or a Core restart while the
+        # subscriber leg remains established in Asterisk.
+        if not live_channel:
+            live_channel = await _asterisk_client.find_active_channel(
+                str(participant.call_id), value
+            )
+        if live_channel:
+            if live_channel != channel_id:
+                await session.rollback()
+                async with session.begin():
+                    refreshed = await session.get(CallParticipant, participant.id)
+                    if refreshed is not None and refreshed.disconnected_at is None:
+                        refreshed.asterisk_channel_id = live_channel
+            return {"call_id": str(participant.call_id)}
+
+    raise HTTPException(status_code=404, detail=f"no live Asterisk call for participant {value}")
+
 @app.get("/api/v1/calls/{call_id}", response_model=CallStatus)
 async def get_call(call_id: str, session: AsyncSession = Depends(get_db_session)) -> CallStatus:
     call_uuid = _parse_call_id(call_id)
@@ -185,7 +241,77 @@ async def _participant_action(call_id: str, extension: str, actor: str, action: 
     service = CallService(session)
     method = {"connect": service.connect_participant, "mute": service.mute_participant, "unmute": service.unmute_participant, "remove": service.remove_participant}[action]
     try:
+        if action in {"mute", "unmute", "remove"}:
+            if _asterisk_client is None:
+                raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+
+            # Participant control must use the channel identity persisted from ARI
+            # events. The adapter's in-memory call/channel map is intentionally not
+            # authoritative because Core may restart while an Asterisk call survives.
+            result = await session.execute(
+                select(CallParticipant).where(
+                    CallParticipant.call_id == call_uuid,
+                    CallParticipant.extension == extension,
+                    CallParticipant.disconnected_at.is_(None),
+                )
+            )
+            participant = result.scalar_one_or_none()
+            if participant is None:
+                raise HTTPException(status_code=404, detail=f"participant {extension} is not active in call {call_id}")
+            channel_id = participant.asterisk_channel_id
+            if not channel_id:
+                # The participant row is created before its ARI StasisStart event.
+                # If Core missed that event, reconcile the participant against the
+                # live ARI endpoint before rejecting a control operation.
+                recovered_channel = await _asterisk_client.find_active_channel(call_uuid, extension)
+                if not recovered_channel:
+                    raise HTTPException(status_code=409, detail=f"participant {extension} has no active Asterisk channel")
+                await session.rollback()
+                async with session.begin():
+                    refreshed = await session.get(CallParticipant, participant.id)
+                    if refreshed is None or refreshed.disconnected_at is not None:
+                        raise HTTPException(status_code=404, detail=f"participant {extension} is no longer active")
+                    refreshed.asterisk_channel_id = recovered_channel
+                channel_id = recovered_channel
+
+            try:
+                if action == "mute":
+                    await _asterisk_client.mute_channel(channel_id)
+                elif action == "unmute":
+                    await _asterisk_client.unmute_channel(channel_id)
+                else:
+                    await _asterisk_client.remove_channel(channel_id)
+            except AsteriskAdapterError as exc:
+                # A Core restart or a missed StasisEnd can leave a stale
+                # channel ID in the DB. Reconcile it against the live ARI
+                # channel list and retry the requested operation once.
+                if "HTTP 404" not in str(exc):
+                    raise
+                recovered_channel = await _asterisk_client.find_active_channel(call_uuid, extension)
+                if not recovered_channel:
+                    raise
+                await session.rollback()
+                async with session.begin():
+                    refreshed = await session.get(CallParticipant, participant.id)
+                    if refreshed is None or refreshed.disconnected_at is not None:
+                        raise HTTPException(status_code=404, detail=f"participant {extension} is no longer active")
+                    refreshed.asterisk_channel_id = recovered_channel
+                channel_id = recovered_channel
+                if action == "mute":
+                    await _asterisk_client.mute_channel(channel_id)
+                elif action == "unmute":
+                    await _asterisk_client.unmute_channel(channel_id)
+                else:
+                    await _asterisk_client.remove_channel(channel_id)
+
+            # Close the read transaction before the service method opens its own.
+            await session.rollback()
+
         await method(call_uuid, extension, actor)
+    except HTTPException:
+        raise
+    except AsteriskAdapterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         status = 404 if "not in call" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
