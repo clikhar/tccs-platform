@@ -155,6 +155,14 @@ async def active_call_for_participant(extension: str, session: AsyncSession = De
 
     raise HTTPException(status_code=404, detail=f"no live Asterisk call for participant {value}")
 
+@app.get("/api/v1/active-calls/source/{extension}")
+async def active_call_for_source(extension: str, session: AsyncSession = Depends(get_db_session)) -> dict:
+    value = str(extension).strip()
+    status = await CallService(session).active_call_for_source(value)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"no active call for source {value}")
+    return {"call_id": status.call_id, "conference_id": status.conference_id}
+
 @app.get("/api/v1/active-conferences/source/{extension}")
 async def active_conference_for_source(extension: str, session: AsyncSession = Depends(get_db_session)) -> dict:
     value = str(extension).strip()
