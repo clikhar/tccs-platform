@@ -37,6 +37,13 @@ class CallService:
     async def mark_asterisk_leg(self, call_id: UUID, extension: str, channel_id: str | None, connected: bool) -> None:
         if not channel_id:
             return
+
+        # SQLAlchemy AsyncSession automatically starts a transaction for reads.
+        # This method is also called after ARI reconciliation/origination, where
+        # a previous read may have left that implicit transaction open. Mutation
+        # methods in CallService own their transaction boundaries, so always close
+        # any read transaction before starting the write transaction.
+        await self.session.rollback()
         async with self.session.begin():
             participant = await self._participant(call_id, extension)
             participant.asterisk_channel_id = channel_id
