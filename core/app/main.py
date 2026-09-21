@@ -191,10 +191,13 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
 
         if live_source_channel:
             for target_participant in target_participants:
+                persisted_target_channel = target_participant.asterisk_channel_id
+                if not persisted_target_channel:
+                    continue
                 candidate = await _asterisk_client.find_active_channel(
                     status.call_id,
                     target_participant.extension,
-                    target_participant.asterisk_channel_id,
+                    persisted_target_channel,
                 )
                 if candidate:
                     live_station_channel = candidate
