@@ -73,6 +73,33 @@ class CallService:
             await self.session.flush()
         return self._status(call)
 
+    async def active_call_for_source(self, source: str) -> CallStatus | None:
+        result = await self.session.execute(
+            select(Call)
+            .where(
+                Call.source_extension == source,
+                Call.state.notin_([CallState.ENDED.value, CallState.FAILED.value]),
+            )
+            .order_by(Call.started_at.desc())
+            .limit(1)
+        )
+        call = result.scalar_one_or_none()
+        return self._status(call) if call else None
+
+    async def promote_to_conference(self, call_id: UUID, conference_id: str) -> None:
+        async with self.session.begin():
+            call = await self.calls.get(call_id)
+            if call is None or call.state in {CallState.ENDED.value, CallState.FAILED.value}:
+                raise ValueError(f"call {call_id} is not active")
+            call.mode = "group"
+            call.conference_id = conference_id
+            self._add_event_by_id(
+                call_id,
+                "conference.promoted",
+                call.source_extension,
+                {"conference_id": conference_id},
+            )
+
     async def active_conference_for_source(self, source: str) -> CallStatus | None:
         result = await self.session.execute(
             select(Call)
