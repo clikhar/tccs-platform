@@ -351,6 +351,46 @@ async def controller_conference_call(payload: dict = Body(...), db: AsyncSession
     return result
 
 
+@app.get("/api/v1/active-calls/participant/{participant}")
+async def controller_active_call_for_participant(
+    participant: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(require_user),
+) -> dict:
+    """Resolve the live Core call for a station/SIP participant.
+
+    The frontend may discover a call that was established before the page loaded,
+    so it must not depend on a browser-held call ID. Core remains authoritative.
+    """
+    value = str(participant).strip()
+    if re.fullmatch(r"10\\d{2}", value):
+        result = await db.execute(
+            select(Station).where(Station.enabled.is_(True), Station.sip_extension == value)
+        )
+        station = result.scalars().first()
+    else:
+        try:
+            station_id = int(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid participant")
+        station = await db.get(Station, station_id)
+
+    if station is None or not station.enabled:
+        raise HTTPException(status_code=404, detail="Station not found")
+    await _authorize_controller_station(station, user, db)
+
+    if not core_client.enabled:
+        raise HTTPException(status_code=503, detail="TCCS Core integration is not configured")
+    try:
+        call_id = await core_client.active_call_for_participant(str(station.sip_extension).strip())
+        return {"call_id": call_id, "extension": str(station.sip_extension).strip()}
+    except Exception as exc:
+        detail = str(exc)
+        if "no active call" in detail.lower() or "no live asterisk call" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=502, detail=detail) from exc
+
+
 @app.post("/api/v1/calls/{call_id}/participants/{participant}/connect")
 async def core_connect_participant(call_id: str, participant: str, payload: dict = Body(default={}), db: AsyncSession = Depends(get_db), user: dict = Depends(require_user)) -> dict:
     return await _core_participant_action(call_id, participant, payload, db, user, "connect")
@@ -419,8 +459,10 @@ async def _core_participant_action(
             authoritative_call_id = await core_client.active_call_for_participant(extension)
             call_id = authoritative_call_id
         except Exception as lookup_exc:
-            if "no active call" in str(lookup_exc).lower():
-                raise HTTPException(status_code=404, detail=str(lookup_exc)) from lookup_exc
+            detail = str(lookup_exc)
+            if "no active call" in detail.lower() or "no live asterisk call" in detail.lower():
+                raise HTTPException(status_code=404, detail=detail) from lookup_exc
+            raise
         return await core_client.participant_action(
             call_id=call_id,
             extension=extension,
