@@ -75,6 +75,15 @@ class AsteriskHttpClient:
         self._channel_participants.setdefault(call_key, {})[channel_id] = source
         return channel_id
 
+    async def attach_participant_channel(self, call_id: str, participant: str, channel_id: str) -> None:
+        """Attach an already-connected inbound channel to an existing call."""
+        call_key = str(call_id)
+        self._participants.setdefault(call_key, {})[participant] = channel_id
+        self._channel_participants.setdefault(call_key, {})[channel_id] = participant
+
+    async def answer_channel(self, channel_id: str) -> None:
+        await self._request("POST", f"/channels/{channel_id}/answer")
+
     async def originate_participant(self, call_id: str, participant: str) -> str:
         call_key = str(call_id)
         channels = self._participants.get(call_key, {})
