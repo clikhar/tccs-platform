@@ -109,6 +109,7 @@ async def active_call_for_participant(extension: str, session: AsyncSession = De
         .join(Call, Call.id == CallParticipant.call_id)
         .where(
             CallParticipant.extension == value,
+            CallParticipant.role == "participant",
             CallParticipant.disconnected_at.is_(None),
             # A participant is actionable only after ARI has persisted the
             # actual Asterisk channel identity. Conference rows are created
@@ -131,12 +132,25 @@ async def active_call_for_participant(extension: str, session: AsyncSession = De
 
     for participant in participants:
         channel_id = participant.asterisk_channel_id
-        if not channel_id:
-            continue
-        live_channel = await _asterisk_client.find_active_channel(
-            str(participant.call_id), value, channel_id
-        )
+        live_channel = None
+        if channel_id:
+            live_channel = await _asterisk_client.find_active_channel(
+                str(participant.call_id), value, channel_id
+            )
+        # If the persisted channel is missing/stale, reconcile against the live
+        # endpoint. This covers a missed StasisStart or a Core restart while the
+        # subscriber leg remains established in Asterisk.
+        if not live_channel:
+            live_channel = await _asterisk_client.find_active_channel(
+                str(participant.call_id), value
+            )
         if live_channel:
+            if live_channel != channel_id:
+                await session.rollback()
+                async with session.begin():
+                    refreshed = await session.get(CallParticipant, participant.id)
+                    if refreshed is not None and refreshed.disconnected_at is None:
+                        refreshed.asterisk_channel_id = live_channel
             return {"call_id": str(participant.call_id)}
 
     raise HTTPException(status_code=404, detail=f"no live Asterisk call for participant {value}")
@@ -246,7 +260,19 @@ async def _participant_action(call_id: str, extension: str, actor: str, action: 
                 raise HTTPException(status_code=404, detail=f"participant {extension} is not active in call {call_id}")
             channel_id = participant.asterisk_channel_id
             if not channel_id:
-                raise HTTPException(status_code=409, detail=f"participant {extension} has no active Asterisk channel")
+                # The participant row is created before its ARI StasisStart event.
+                # If Core missed that event, reconcile the participant against the
+                # live ARI endpoint before rejecting a control operation.
+                recovered_channel = await _asterisk_client.find_active_channel(call_uuid, extension)
+                if not recovered_channel:
+                    raise HTTPException(status_code=409, detail=f"participant {extension} has no active Asterisk channel")
+                await session.rollback()
+                async with session.begin():
+                    refreshed = await session.get(CallParticipant, participant.id)
+                    if refreshed is None or refreshed.disconnected_at is not None:
+                        raise HTTPException(status_code=404, detail=f"participant {extension} is no longer active")
+                    refreshed.asterisk_channel_id = recovered_channel
+                channel_id = recovered_channel
 
             try:
                 if action == "mute":
