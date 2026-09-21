@@ -4,7 +4,7 @@ import re
 
 from .ami import conference_channels, enforce_single_conference_channel, originate_to_conference
 from .asterisk import active_channel_details
-from .core_client import core_client
+from .core_client import CoreClientError, core_client
 from .db import SessionLocal
 from sqlalchemy import text
 
@@ -71,6 +71,25 @@ async def call_station(extension: str, conference: str | None = None):
     # answers the incoming INVITE and Core then bridges the station to it.
     if core_client.enabled:
         source = await controller_extension_for_station(extension)
+
+        # If the controller already owns a live conference, a station that
+        # previously left that conference must rejoin the same conference
+        # instead of creating a second individual call.
+        try:
+            conference_call_id = await core_client.active_conference_for_source(source)
+        except CoreClientError as exc:
+            if "no active conference" not in str(exc):
+                raise
+            conference_call_id = None
+
+        if conference_call_id:
+            return await core_client.participant_action(
+                call_id=conference_call_id,
+                extension=extension,
+                action="connect",
+                actor=source,
+            )
+
         return await core_client.create_call(
             source=source,
             target=extension,
