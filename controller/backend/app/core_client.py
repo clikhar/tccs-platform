@@ -42,7 +42,12 @@ class TCCSCoreClient:
                 detail = response.json().get("detail")
             except Exception:
                 detail = None
-            raise CoreClientError(detail or f"TCCS Core returned HTTP {response.status_code}")
+            if not detail:
+                body = response.text.strip().replace("\n", " ")
+                detail = body[:1000] if body else None
+            raise CoreClientError(
+                detail or f"TCCS Core returned HTTP {response.status_code}"
+            )
         return response.json()
 
     async def create_call(
