@@ -54,4 +54,25 @@ class AsteriskEventProcessor:
             await service.handle_asterisk_event(event)
 
             if call_id is not None:
+                # For an individual call, the station hanging up must terminate
+                # the controller leg as well. Otherwise the browser keeps its
+                # SIP.js session established and Asterisk reports the controller
+                # as IN CALL, so the next call arrives as a second INVITE and is
+                # rejected by the existing controller session.
+                status = await service.get(call_id)
+                if status is not None and status.state.value == "ENDED":
+                    for participant in await service.participants(call_id):
+                        if (
+                            participant.role == "controller"
+                            and participant.asterisk_channel_id
+                        ):
+                            try:
+                                await self.asterisk.remove_channel(
+                                    participant.asterisk_channel_id
+                                )
+                            except Exception:
+                                # cleanup_call below still performs best-effort
+                                # bridge/channel cleanup using its live mapping.
+                                pass
+
                 await self.asterisk.cleanup_call(str(call_id), event.channel_id or "")
