@@ -98,6 +98,27 @@ class TCCSCoreClient:
             raise CoreClientError(detail or f"TCCS Core returned HTTP {response.status_code}")
         return str(response.json()["call_id"])
 
+    async def active_call_for_source(self, extension: str) -> tuple[str, str | None]:
+        if not self.enabled:
+            raise CoreClientError("TCCS Core integration is not configured")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/active-calls/source/{str(extension).strip()}"
+                )
+        except httpx.HTTPError as exc:
+            raise CoreClientError(f"TCCS Core unavailable: {exc}") from exc
+        if response.status_code == 404:
+            raise CoreClientError("no active call")
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail")
+            except Exception:
+                detail = None
+            raise CoreClientError(detail or f"TCCS Core returned HTTP {response.status_code}")
+        payload = response.json()
+        return str(payload["call_id"]), payload.get("conference_id")
+
     async def active_conference_for_source(self, extension: str) -> str:
         if not self.enabled:
             raise CoreClientError("TCCS Core integration is not configured")
