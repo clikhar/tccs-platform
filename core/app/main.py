@@ -12,7 +12,7 @@ from .adapters.asterisk_event_processor import AsteriskEventProcessor
 from .adapters.asterisk_events import AsteriskEventStream
 from .config import settings
 from .db import check_database, close_database, get_db_session
-from .db_models import Call, CallParticipant
+from .db_models import Call, CallParticipant, CallState
 from .models import CallRequest, CallStatus, ConferenceCallRequest, ParticipantActionRequest, ParticipantStatus
 from .services.call_orchestrator import CallOrchestrator
 from .services.call_service import CallService
