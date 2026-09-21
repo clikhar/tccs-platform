@@ -77,8 +77,21 @@ class CallOrchestrator:
 
         # The ARI adapter keeps channel mappings in memory, so a Core restart
         # loses the mapping even though the live Asterisk channels remain.
-        # Reconcile persisted channel IDs with live ARI channels before trying
-        # to originate another participant.
+        # Always reconcile the controller first. This also handles older calls
+        # whose persisted controller channel ID is missing.
+        source_channel = await self.asterisk.find_active_channel(
+            str(call_id),
+            status.source,
+            None,
+        )
+        if source_channel:
+            await self.asterisk.attach_participant_channel(
+                str(call_id),
+                status.source,
+                source_channel,
+            )
+
+        # Then restore any other persisted participant channels.
         all_participants = await self.service.participants(call_id)
         channel_data = [
             (item.extension, item.role, item.asterisk_channel_id)
