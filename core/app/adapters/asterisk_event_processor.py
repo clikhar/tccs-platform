@@ -35,6 +35,51 @@ class AsteriskEventProcessor:
                     await self.asterisk.originate_participant(call_id, target)
                 return
 
+            if event.event_type == "StasisStart" and len(args) >= 3 and args[0] == "inbound":
+                controller = str(args[1]).strip()
+                participant = str(args[2]).strip()
+                if not controller or not participant or event.channel_id is None:
+                    return
+
+                status = await service.active_conference_for_source(controller)
+                if status is None or status.conference_id is None:
+                    # No active conference exists for this controller. Do not
+                    # deliver the call to the browser as a second SIP session.
+                    try:
+                        await self.asterisk.remove_channel(event.channel_id)
+                    except Exception:
+                        pass
+                    return
+
+                await session.rollback()
+                try:
+                    await service.add_conference_participant(
+                        UUID(status.call_id),
+                        participant,
+                        actor=participant,
+                    )
+                    await session.rollback()
+                    await self.asterisk.attach_participant_channel(
+                        status.call_id,
+                        participant,
+                        event.channel_id,
+                    )
+                    await self.asterisk.answer_channel(event.channel_id)
+                    await service.mark_asterisk_leg(
+                        UUID(status.call_id),
+                        participant,
+                        event.channel_id,
+                        connected=True,
+                    )
+                    await self.asterisk.bridge_call(status.call_id, participant)
+                except Exception:
+                    try:
+                        await self.asterisk.remove_channel(event.channel_id)
+                    except Exception:
+                        pass
+                    raise
+                return
+
             if event.event_type == "StasisStart" and len(args) >= 3 and args[0] == "callee":
                 call_id = UUID(str(args[1]))
                 participant = str(args[2])
