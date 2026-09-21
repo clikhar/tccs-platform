@@ -68,7 +68,7 @@ class CallService:
             await self.calls.add(call)
             self.session.add(CallParticipant(call_id=call.id, extension=source, role="controller", muted=False, connected_at=datetime.now(timezone.utc)))
             for extension in unique_targets:
-                self.session.add(CallParticipant(call_id=call.id, extension=extension, role="participant", muted=True))
+                self.session.add(CallParticipant(call_id=call.id, extension=extension, role="participant", muted=False))
             self._add_event(call, "conference.created", source, {"mode": mode, "conference_id": conference_id, "targets": unique_targets})
             await self.session.flush()
         return self._status(call)
