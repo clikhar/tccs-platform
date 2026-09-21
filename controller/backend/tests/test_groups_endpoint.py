@@ -100,7 +100,7 @@ async def test_controller_groups_returns_members_for_admin():
     assert db.params == {}
     sql = str(db.statement)
     assert "g.id" in sql
-    assert "m.station_group_id = g.id" in sql
+    assert "m.group_id = g.id" in sql
     assert "g.station_group_id" not in sql
 
 
