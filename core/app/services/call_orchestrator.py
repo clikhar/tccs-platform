@@ -27,6 +27,45 @@ class CallOrchestrator:
         await self.service.bind_asterisk_channel(call_id, request.source, channel_id)
         return (await self.service.get(call_id)) or status
 
+    async def add_station_to_active_call(
+        self,
+        call_id: UUID,
+        extension: str,
+        actor: str | None = None,
+    ) -> CallStatus:
+        status = await self.service.get(call_id)
+        if status is None or status.state in {"ended", "failed"}:
+            raise ValueError(f"call {call_id} is not active")
+
+        if status.conference_id is None:
+            await self.service.promote_to_conference(call_id, f"group-{call_id}")
+
+        participants = await self.service.participants(call_id)
+        participant = next(
+            (item for item in participants if item.extension == extension),
+            None,
+        )
+        if participant is None:
+            await self.service.add_conference_participant(
+                call_id,
+                extension,
+                actor=actor,
+            )
+            participants = await self.service.participants(call_id)
+            participant = next(item for item in participants if item.extension == extension)
+
+        if participant.asterisk_channel_id:
+            return (await self.service.get(call_id)) or status
+
+        channel_id = await self.asterisk.originate_participant(str(call_id), extension)
+        await self.service.mark_asterisk_leg(
+            call_id,
+            extension,
+            channel_id,
+            connected=False,
+        )
+        return (await self.service.get(call_id)) or status
+
     async def rejoin_conference_participant(
         self,
         call_id: UUID,
