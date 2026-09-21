@@ -46,6 +46,14 @@ class CallService:
         await self.session.rollback()
         async with self.session.begin():
             participant = await self._participant(call_id, extension)
+
+            # ARI is asynchronous: StasisStart/StasisEnd can be processed
+            # before originate_participant() returns. If a fast reject already
+            # marked this leg disconnected, a late HTTP response must NEVER
+            # resurrect the old channel pointer or the call.
+            if not connected and participant.disconnected_at is not None:
+                return
+
             participant.asterisk_channel_id = channel_id
             if connected:
                 participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
