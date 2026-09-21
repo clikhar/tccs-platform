@@ -76,8 +76,16 @@ class CallService:
     async def connect_participant(self, call_id: UUID, extension: str, actor: str | None = None) -> None:
         async with self.session.begin():
             participant = await self._participant(call_id, extension)
+            if participant.role == "controller":
+                raise ValueError("controller cannot be reconnected as a conference participant")
+            participant.disconnected_at = None
             participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
-            self._add_event_by_id(call_id, "participant.connected", actor or extension, {"extension": extension})
+            self._add_event_by_id(
+                call_id,
+                "participant.connected",
+                actor or extension,
+                {"extension": extension, "rejoined": True},
+            )
 
     async def mute_participant(self, call_id: UUID, extension: str, actor: str | None = None) -> None:
         async with self.session.begin():
@@ -143,7 +151,10 @@ class CallService:
                 call.state = CallState.ENDED.value
                 call.ended_at = datetime.now(timezone.utc)
             else:
-                active = await self._active_participants(call.id)
+                # Conference lifetime is determined by participant legs, not the
+                # controller leg. The controller is intentionally persistent while
+                # at least one station remains in the conference.
+                active = await self._active_participants(call.id, role="participant")
                 if not active:
                     call.state = CallState.ENDED.value
                     call.ended_at = datetime.now(timezone.utc)
@@ -188,8 +199,19 @@ class CallService:
         result = await self.session.execute(select(CallParticipant).where(CallParticipant.asterisk_channel_id == channel_id))
         return result.scalar_one_or_none()
 
-    async def _active_participants(self, call_id: UUID) -> list[CallParticipant]:
-        result = await self.session.execute(select(CallParticipant).where(CallParticipant.call_id == call_id, CallParticipant.disconnected_at.is_(None), CallParticipant.asterisk_channel_id.is_not(None)))
+    async def _active_participants(
+        self,
+        call_id: UUID,
+        role: str | None = None,
+    ) -> list[CallParticipant]:
+        query = select(CallParticipant).where(
+            CallParticipant.call_id == call_id,
+            CallParticipant.disconnected_at.is_(None),
+            CallParticipant.asterisk_channel_id.is_not(None),
+        )
+        if role is not None:
+            query = query.where(CallParticipant.role == role)
+        result = await self.session.execute(query)
         return list(result.scalars())
 
     async def _participant(self, call_id: UUID, extension: str) -> CallParticipant:
