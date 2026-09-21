@@ -91,32 +91,44 @@ class CallOrchestrator:
                 source_channel,
             )
 
-        # Then restore any other persisted participant channels.
-        all_participants = await self.service.participants(call_id)
-        channel_data = [
-            (item.extension, item.role, item.asterisk_channel_id)
-            for item in all_participants
-            if item.asterisk_channel_id
-        ]
-        await self.service.session.rollback()
-
-        for mapped_extension, role, persisted_channel in channel_data:
-            if role not in {"controller", "participant"}:
-                continue
-            live_channel = await self.asterisk.find_active_channel(
+        # Reconcile only the participant requested by this operation.
+        #
+        # IMPORTANT: a live PJSIP/<extension> channel is NOT sufficient proof
+        # that it belongs to this call. The same station may have a channel from
+        # another call, and find_active_channel() can only identify an endpoint
+        # by name when no persisted channel ID is supplied. For call ownership we
+        # therefore trust only the channel ID persisted for THIS participant row.
+        #
+        # This also fixes the 1001 -> reject -> 1001 retry case: an old channel
+        # ID in PostgreSQL must never cause us to return without originating the
+        # new participant leg.
+        persisted_target_channel = participant[2]
+        live_target_channel = None
+        if persisted_target_channel:
+            live_target_channel = await self.asterisk.find_active_channel(
                 str(call_id),
-                mapped_extension,
-                persisted_channel,
+                extension,
+                persisted_target_channel,
             )
-            if live_channel:
-                await self.asterisk.attach_participant_channel(
-                    str(call_id),
-                    mapped_extension,
-                    live_channel,
-                )
+            await self.service.session.rollback()
 
-        if participant[2]:
+        if live_target_channel:
+            await self.asterisk.attach_participant_channel(
+                str(call_id),
+                extension,
+                live_target_channel,
+            )
             return (await self.service.get(call_id)) or status
+
+        if persisted_target_channel:
+            # The DB pointer is stale. Clear it before originating a replacement
+            # channel. Never use the stale pointer as an indication that the
+            # participant is already connected.
+            await self.service.session.rollback()
+            async with self.service.session.begin():
+                stale_participant = await self.service._participant(call_id, extension)
+                stale_participant.asterisk_channel_id = None
+                stale_participant.disconnected_at = None
 
         channel_id = await self.asterisk.originate_participant(str(call_id), extension)
         await self.service.mark_asterisk_leg(
@@ -159,9 +171,10 @@ class CallOrchestrator:
 
         persisted_channel = participant_data[2]
 
-        # Rehydrate the in-memory ARI mapping after Core restarts and reject
-        # stale DB channel IDs. A participant row is not proof that its SIP leg
-        # still exists in Asterisk.
+        # A participant can leave a persistent conference and later rejoin.
+        # Only the persisted channel for this participant proves that a live
+        # channel belongs to this conference. Do not adopt an unrelated live
+        # PJSIP/<extension> channel from another call.
         if persisted_channel:
             live_channel = await self.asterisk.find_active_channel(
                 str(call_id), extension, persisted_channel
@@ -205,8 +218,10 @@ class CallOrchestrator:
             channel_id,
             connected=False,
         )
-        await self.service.session.rollback()
-        await self.service.connect_participant(call_id, extension, actor=actor)
+        # Do not mark the participant connected here. The SIP leg is only
+        # connected when Asterisk emits StasisStart for the originated callee.
+        # Marking it connected before that event creates a false "mature" call
+        # and can race the StasisEnd cleanup path.
         return (await self.service.get(call_id)) or status
 
     async def create_conference(
