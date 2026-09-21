@@ -167,43 +167,50 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
     # already destroyed the controller channel. Never route a new station
     # into such an orphaned call.
     if _asterisk_client is not None:
+        call_uuid = _parse_call_id(status.call_id)
         live_source_channel = await _asterisk_client.find_active_channel(
             status.call_id,
             value,
             None,
         )
 
-        # For an individual call, the controller channel alone is NOT enough
-        # to consider the call active. The target station may already have
-        # rejected/hung up, while the controller leg is still briefly alive.
-        # If we return this stale call, the next 9999 -> station attempt is
-        # incorrectly routed into the old call and never originates a fresh
-        # target leg.
-        live_target_channel = None
-        if live_source_channel and status.conference_id is None:
-            participants_result = await session.execute(
-                select(CallParticipant).where(
-                    CallParticipant.call_id == _parse_call_id(status.call_id),
-                    CallParticipant.role == "participant",
-                    CallParticipant.disconnected_at.is_(None),
-                )
+        # A conference is only active while BOTH the controller channel and at
+        # least one station channel are actually alive in Asterisk. A stale DB
+        # participant must never keep the controller trapped in an old bridge.
+        live_station_channel = None
+        live_station_extension = None
+        participants_result = await session.execute(
+            select(CallParticipant).where(
+                CallParticipant.call_id == call_uuid,
+                CallParticipant.role == "participant",
+                CallParticipant.disconnected_at.is_(None),
             )
-            target_participants = participants_result.scalars().all()
-            await session.rollback()
+        )
+        target_participants = list(participants_result.scalars().all())
+        await session.rollback()
 
+        if live_source_channel:
             for target_participant in target_participants:
-                live_target_channel = await _asterisk_client.find_active_channel(
+                candidate = await _asterisk_client.find_active_channel(
                     status.call_id,
                     target_participant.extension,
                     target_participant.asterisk_channel_id,
                 )
-                if live_target_channel:
+                if candidate:
+                    live_station_channel = candidate
+                    live_station_extension = target_participant.extension
                     break
 
-        if not live_source_channel or (
-            status.conference_id is None and not live_target_channel
-        ):
-            call_uuid = _parse_call_id(status.call_id)
+        call_is_live = bool(live_source_channel) and (
+            status.conference_id is not None
+            and bool(live_station_channel)
+            or status.conference_id is None
+            and bool(live_station_channel)
+        )
+
+        if not call_is_live:
+            # The database can outlive Asterisk after a rejected/hung-up station
+            # leg. Atomically retire the orphaned call and all participant legs.
             await session.rollback()
             async with session.begin():
                 call = await session.get(Call, call_uuid)
@@ -223,9 +230,6 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
                         participant.disconnected_at = datetime.now(timezone.utc)
                         participant.asterisk_channel_id = None
 
-            # The source channel can still be alive for a short time after the
-            # target rejects. Explicitly release it so SIP.js returns to the
-            # REGISTERED state before the next outbound attempt.
             if live_source_channel:
                 try:
                     await _asterisk_client.remove_channel(live_source_channel)
@@ -237,13 +241,18 @@ async def active_call_for_source(extension: str, session: AsyncSession = Depends
                 detail=f"no live active call for source {value}",
             )
 
-        # Rehydrate the adapter mapping so a subsequent participant originate
-        # does not depend on Core process lifetime.
+        # Rehydrate every live channel into the process-local ARI mapping.
         await _asterisk_client.attach_participant_channel(
             status.call_id,
             value,
             live_source_channel,
         )
+        if live_station_extension and live_station_channel:
+            await _asterisk_client.attach_participant_channel(
+                status.call_id,
+                live_station_extension,
+                live_station_channel,
+            )
 
     return {"call_id": status.call_id, "conference_id": status.conference_id}
 
@@ -261,9 +270,80 @@ async def active_conference_for_source(extension: str, session: AsyncSession = D
         .limit(1)
     )
     call = result.scalar_one_or_none()
+    await session.rollback()
     if call is None:
         raise HTTPException(status_code=404, detail=f"no active conference for source {value}")
-    return {"call_id": str(call.id), "conference_id": str(call.conference_id)}
+
+    if _asterisk_client is None:
+        raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+
+    call_id = str(call.id)
+    source_channel = await _asterisk_client.find_active_channel(call_id, value, None)
+    if not source_channel:
+        await session.rollback()
+        async with session.begin():
+            stale = await session.get(Call, call.id)
+            if stale is not None and stale.state not in {CallState.ENDED.value, CallState.FAILED.value}:
+                stale.state = CallState.ENDED.value
+                stale.ended_at = datetime.now(timezone.utc)
+                rows = await session.execute(
+                    select(CallParticipant).where(
+                        CallParticipant.call_id == call.id,
+                        CallParticipant.disconnected_at.is_(None),
+                    )
+                )
+                for participant in rows.scalars():
+                    participant.disconnected_at = datetime.now(timezone.utc)
+                    participant.asterisk_channel_id = None
+        raise HTTPException(status_code=404, detail=f"no live active conference for source {value}")
+
+    participants = await session.execute(
+        select(CallParticipant).where(
+            CallParticipant.call_id == call.id,
+            CallParticipant.role == "participant",
+            CallParticipant.disconnected_at.is_(None),
+        )
+    )
+    station_rows = list(participants.scalars().all())
+    await session.rollback()
+
+    live_station = None
+    live_extension = None
+    for participant in station_rows:
+        candidate = await _asterisk_client.find_active_channel(
+            call_id, participant.extension, participant.asterisk_channel_id
+        )
+        if candidate:
+            live_station = candidate
+            live_extension = participant.extension
+            break
+
+    if not live_station:
+        await session.rollback()
+        async with session.begin():
+            stale = await session.get(Call, call.id)
+            if stale is not None and stale.state not in {CallState.ENDED.value, CallState.FAILED.value}:
+                stale.state = CallState.ENDED.value
+                stale.ended_at = datetime.now(timezone.utc)
+                rows = await session.execute(
+                    select(CallParticipant).where(
+                        CallParticipant.call_id == call.id,
+                        CallParticipant.disconnected_at.is_(None),
+                    )
+                )
+                for participant in rows.scalars():
+                    participant.disconnected_at = datetime.now(timezone.utc)
+                    participant.asterisk_channel_id = None
+
+        try:
+            await _asterisk_client.remove_channel(source_channel)
+        except Exception:
+            pass
+        raise HTTPException(status_code=404, detail=f"no live active conference for source {value}")
+
+    await _asterisk_client.attach_participant_channel(call_id, value, source_channel)
+    await _asterisk_client.attach_participant_channel(call_id, live_extension, live_station)
+    return {"call_id": call_id, "conference_id": str(call.conference_id)}
 
 @app.get("/api/v1/calls/{call_id}", response_model=CallStatus)
 async def get_call(call_id: str, session: AsyncSession = Depends(get_db_session)) -> CallStatus:
