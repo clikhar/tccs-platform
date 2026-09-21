@@ -73,6 +73,71 @@ class CallService:
             await self.session.flush()
         return self._status(call)
 
+    async def active_conference_for_source(self, source: str) -> CallStatus | None:
+        result = await self.session.execute(
+            select(Call)
+            .where(
+                Call.source_extension == source,
+                Call.conference_id.is_not(None),
+                Call.state.in_([
+                    CallState.INITIATED.value,
+                    CallState.RINGING.value,
+                    CallState.CONNECTED.value,
+                    CallState.CONFERENCE.value,
+                ]),
+            )
+            .order_by(Call.started_at.desc())
+            .limit(1)
+        )
+        call = result.scalar_one_or_none()
+        return self._status(call) if call else None
+
+    async def add_conference_participant(
+        self,
+        call_id: UUID,
+        extension: str,
+        actor: str | None = None,
+    ) -> None:
+        async with self.session.begin():
+            call = await self.calls.get(call_id)
+            if call is None or call.conference_id is None or call.state in {
+                CallState.ENDED.value,
+                CallState.FAILED.value,
+            }:
+                raise ValueError(f"call {call_id} is not an active conference")
+
+            result = await self.session.execute(
+                select(CallParticipant).where(
+                    CallParticipant.call_id == call_id,
+                    CallParticipant.extension == extension,
+                )
+            )
+            participant = result.scalar_one_or_none()
+            if participant is None:
+                participant = CallParticipant(
+                    call_id=call_id,
+                    extension=extension,
+                    role="participant",
+                    muted=False,
+                )
+                self.session.add(participant)
+                targets = [
+                    value.strip()
+                    for value in (call.target or "").split(",")
+                    if value.strip()
+                ]
+                if extension not in targets:
+                    targets.append(extension)
+                    call.target = ",".join(targets)
+            participant.disconnected_at = None
+            participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
+            self._add_event_by_id(
+                call_id,
+                "participant.connected",
+                actor or extension,
+                {"extension": extension, "inbound": True},
+            )
+
     async def connect_participant(self, call_id: UUID, extension: str, actor: str | None = None) -> None:
         async with self.session.begin():
             participant = await self._participant(call_id, extension)
