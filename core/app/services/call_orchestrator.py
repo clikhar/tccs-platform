@@ -133,29 +133,79 @@ class CallOrchestrator:
         extension: str,
         actor: str | None = None,
     ) -> CallStatus:
+        # Every read on AsyncSession can implicitly open a transaction. Close it
+        # before invoking mutation methods which own their transactions.
         status = await self.service.get(call_id)
+        await self.service.session.rollback()
+
         if status is None:
             raise ValueError(f"call {call_id} not found")
         if status.conference_id is None or status.state in {"ended", "failed"}:
             raise ValueError(f"call {call_id} is not an active conference")
 
         participants = await self.service.participants(call_id)
-        participant = next(
-            (item for item in participants if item.extension == extension),
+        participant_data = next(
+            (
+                (item.extension, item.role, item.asterisk_channel_id)
+                for item in participants
+                if item.extension == extension
+            ),
             None,
         )
-        if participant is None or participant.role != "participant":
+        await self.service.session.rollback()
+
+        if participant_data is None or participant_data[1] != "participant":
             raise ValueError(f"participant {extension} is not in conference {call_id}")
-        if participant.asterisk_channel_id:
-            return status
+
+        persisted_channel = participant_data[2]
+
+        # Rehydrate the in-memory ARI mapping after Core restarts and reject
+        # stale DB channel IDs. A participant row is not proof that its SIP leg
+        # still exists in Asterisk.
+        if persisted_channel:
+            live_channel = await self.asterisk.find_active_channel(
+                str(call_id), extension, persisted_channel
+            )
+            await self.service.session.rollback()
+            if live_channel:
+                await self.asterisk.attach_participant_channel(
+                    str(call_id), extension, live_channel
+                )
+                return (await self.service.get(call_id)) or status
+
+            await self.service.session.rollback()
+            async with self.service.session.begin():
+                participant = await self.service._participant(call_id, extension)
+                participant.asterisk_channel_id = None
+                participant.disconnected_at = None
+
+        # The controller/source leg must also be present and mapped before a
+        # participant can be originated. This makes rejoin independent of
+        # Core's process-local adapter state.
+        source_channel = await self.asterisk.find_active_channel(
+            str(call_id), status.source, None
+        )
+        await self.service.session.rollback()
+        if not source_channel:
+            raise ValueError(
+                f"conference {call_id} has no live controller channel for {status.source}"
+            )
+        await self.asterisk.attach_participant_channel(
+            str(call_id), status.source, source_channel
+        )
 
         channel_id = await self.asterisk.originate_participant(str(call_id), extension)
+
+        # mark_asterisk_leg owns its transaction. The rollback above is
+        # essential because the preceding ORM reads may have started one.
+        await self.service.session.rollback()
         await self.service.mark_asterisk_leg(
             call_id,
             extension,
             channel_id,
             connected=False,
         )
+        await self.service.session.rollback()
         await self.service.connect_participant(call_id, extension, actor=actor)
         return (await self.service.get(call_id)) or status
 
