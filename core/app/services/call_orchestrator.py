@@ -34,22 +34,27 @@ class CallOrchestrator:
         actor: str | None = None,
     ) -> CallStatus:
         status = await self.service.get(call_id)
-        # AsyncSession uses autobegin for SELECTs. The service write methods
-        # intentionally manage their own transactions, so close the read-only
-        # transaction before entering the next service transaction.
         await self.service.session.rollback()
         if status is None or status.state in {"ended", "failed"}:
             raise ValueError(f"call {call_id} is not active")
 
         if status.conference_id is None:
             await self.service.promote_to_conference(call_id, f"group-{call_id}")
+            # promote_to_conference commits its transaction. Do not retain ORM
+            # instances across that commit/rollback boundary.
+            await self.service.session.rollback()
 
         participants = await self.service.participants(call_id)
+        participant_data = [
+            (item.extension, item.role, item.asterisk_channel_id)
+            for item in participants
+        ]
         await self.service.session.rollback()
         participant = next(
-            (item for item in participants if item.extension == extension),
+            (item for item in participant_data if item[0] == extension),
             None,
         )
+
         if participant is None:
             await self.service.add_conference_participant(
                 call_id,
@@ -57,10 +62,21 @@ class CallOrchestrator:
                 actor=actor,
             )
             participants = await self.service.participants(call_id)
+            participant_data = [
+                (item.extension, item.role, item.asterisk_channel_id)
+                for item in participants
+            ]
             await self.service.session.rollback()
-            participant = next(item for item in participants if item.extension == extension)
+            participant = next(
+                (item for item in participant_data if item[0] == extension),
+                None,
+            )
 
-        if participant.asterisk_channel_id:
+        if participant is None:
+            raise ValueError(f"participant {extension} is not in call {call_id}")
+
+        # Work only with primitive values after the transaction boundary.
+        if participant[2]:
             return (await self.service.get(call_id)) or status
 
         channel_id = await self.asterisk.originate_participant(str(call_id), extension)
