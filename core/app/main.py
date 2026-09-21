@@ -185,7 +185,34 @@ async def get_participants(call_id: str, session: AsyncSession = Depends(get_db_
 
 @app.post("/api/v1/calls/{call_id}/participants/{extension}/connect", response_model=ParticipantStatus)
 async def connect_participant(call_id: str, extension: str, request: ParticipantActionRequest, session: AsyncSession = Depends(get_db_session)) -> ParticipantStatus:
-    return await _participant_action(call_id, extension, request.actor, "connect", session)
+    call_uuid = _parse_call_id(call_id)
+    try:
+        if settings.asterisk_ari_enabled:
+            if _asterisk_client is None:
+                raise HTTPException(status_code=503, detail="Asterisk adapter unavailable")
+            service = CallService(session)
+            status = await service.get(call_uuid)
+            if status is None:
+                raise HTTPException(status_code=404, detail=f"call {call_id} not found")
+            if status.conference_id is None:
+                raise HTTPException(status_code=409, detail="participant rejoin is only supported for conferences")
+            await session.rollback()
+            await CallOrchestrator(session, _asterisk_client).rejoin_conference_participant(
+                call_uuid,
+                str(extension).strip(),
+                actor=request.actor,
+            )
+            participant = next(
+                item
+                for item in await service.participants(call_uuid)
+                if item.extension == str(extension).strip()
+            )
+            return _participant_status(call_uuid, participant)
+        return await _participant_action(call_id, extension, request.actor, "connect", session)
+    except HTTPException:
+        raise
+    except (AsteriskAdapterError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/calls/{call_id}/participants/{extension}/mute", response_model=ParticipantStatus)
