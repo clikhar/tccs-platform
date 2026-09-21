@@ -164,10 +164,12 @@ class CallService:
                     targets.append(extension)
                     call.target = ",".join(targets)
             participant.disconnected_at = None
-            participant.connected_at = participant.connected_at or datetime.now(timezone.utc)
+            # This method is also used while attaching an inbound leg. The
+            # channel is not connected until ARI StasisStart is processed, so
+            # do not manufacture connected_at here.
             self._add_event_by_id(
                 call_id,
-                "participant.connected",
+                "participant.connecting",
                 actor or extension,
                 {"extension": extension, "inbound": True},
             )
