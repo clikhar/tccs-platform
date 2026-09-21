@@ -123,7 +123,7 @@ async def controller_groups(
             s.sip_extension
         FROM station_groups g
         LEFT JOIN station_group_members m
-            ON m.station_group_id = g.id
+            ON m.group_id = g.id
         LEFT JOIN stations s
             ON s.id = m.station_id
            AND s.enabled = TRUE
@@ -363,7 +363,7 @@ async def controller_active_call_for_participant(
     so it must not depend on a browser-held call ID. Core remains authoritative.
     """
     value = str(participant).strip()
-    if re.fullmatch(r"10\\d{2}", value):
+    if re.fullmatch(r"10\d{2}", value):
         result = await db.execute(
             select(Station).where(Station.enabled.is_(True), Station.sip_extension == value)
         )
