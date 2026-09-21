@@ -34,6 +34,10 @@ class CallOrchestrator:
         actor: str | None = None,
     ) -> CallStatus:
         status = await self.service.get(call_id)
+        # AsyncSession uses autobegin for SELECTs. The service write methods
+        # intentionally manage their own transactions, so close the read-only
+        # transaction before entering the next service transaction.
+        await self.service.session.rollback()
         if status is None or status.state in {"ended", "failed"}:
             raise ValueError(f"call {call_id} is not active")
 
@@ -41,6 +45,7 @@ class CallOrchestrator:
             await self.service.promote_to_conference(call_id, f"group-{call_id}")
 
         participants = await self.service.participants(call_id)
+        await self.service.session.rollback()
         participant = next(
             (item for item in participants if item.extension == extension),
             None,
@@ -52,6 +57,7 @@ class CallOrchestrator:
                 actor=actor,
             )
             participants = await self.service.participants(call_id)
+            await self.service.session.rollback()
             participant = next(item for item in participants if item.extension == extension)
 
         if participant.asterisk_channel_id:
