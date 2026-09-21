@@ -363,17 +363,7 @@ async def controller_active_call_for_participant(
     so it must not depend on a browser-held call ID. Core remains authoritative.
     """
     value = str(participant).strip()
-    if re.fullmatch(r"10\d{2}", value):
-        result = await db.execute(
-            select(Station).where(Station.enabled.is_(True), Station.sip_extension == value)
-        )
-        station = result.scalars().first()
-    else:
-        try:
-            station_id = int(value)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid participant")
-        station = await db.get(Station, station_id)
+    station = await _resolve_station_participant(value, db)
 
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
@@ -411,6 +401,32 @@ async def core_disconnect_participant(call_id: str, participant: str, payload: d
     return await _core_participant_action(call_id, participant, payload, db, user, "disconnect")
 
 
+async def _resolve_station_participant(value: str, db: AsyncSession) -> Station | None:
+    """Resolve a controller participant by station number, SIP extension, or DB id.
+
+    The frontend uses station numbers as participant IDs, while Core control
+    operates on SIP extensions. Station number must therefore be checked before
+    treating a numeric value as a database primary key.
+    """
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+
+    result = await db.execute(
+        select(Station).where(
+            Station.enabled.is_(True),
+            (Station.station_number == normalized) | (Station.sip_extension == normalized),
+        )
+    )
+    station = result.scalars().first()
+    if station is not None:
+        return station
+
+    if normalized.isdigit():
+        return await db.get(Station, int(normalized))
+    return None
+
+
 async def _core_participant_action(
     call_id: str,
     participant: str,
@@ -423,16 +439,7 @@ async def _core_participant_action(
         raise HTTPException(status_code=503, detail="TCCS Core integration is not configured")
 
     value = str(participant).strip()
-    station = None
-    if re.fullmatch(r"10\d{2}", value):
-        result = await db.execute(select(Station).where(Station.enabled.is_(True), Station.sip_extension == value))
-        station = result.scalars().first()
-    else:
-        try:
-            station_id = int(value)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid participant")
-        station = await db.get(Station, station_id)
+    station = await _resolve_station_participant(value, db)
 
     if station is None or not station.enabled:
         raise HTTPException(status_code=404, detail="Station not found")
