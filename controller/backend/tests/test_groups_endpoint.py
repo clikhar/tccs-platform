@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.main import controller_groups
+from app.main import _resolve_station_participant, controller_groups
 
 
 class FakeResult:
@@ -118,3 +118,24 @@ async def test_controller_groups_scopes_controller_to_assigned_section():
     sql = str(db.statement)
     assert "g.section_id" in sql
     assert "controllers" in sql
+
+
+@pytest.mark.asyncio
+async def test_participant_resolution_prefers_station_number_over_database_id():
+    class StationResult:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=1, station_number="101", sip_extension="1001", enabled=True)
+
+    class StationDb:
+        async def execute(self, statement, params=None):
+            return StationResult()
+
+        async def get(self, model, station_id):
+            raise AssertionError("DB id fallback must not run when station number matches")
+
+    station = await _resolve_station_participant("101", StationDb())
+    assert station.station_number == "101"
+    assert station.sip_extension == "1001"
