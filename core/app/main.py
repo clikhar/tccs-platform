@@ -220,14 +220,19 @@ async def connect_participant(call_id: str, extension: str, request: Participant
             status = await service.get(call_uuid)
             if status is None:
                 raise HTTPException(status_code=404, detail=f"call {call_id} not found")
-            if status.conference_id is None:
-                raise HTTPException(status_code=409, detail="participant rejoin is only supported for conferences")
             await session.rollback()
-            await CallOrchestrator(session, _asterisk_client).rejoin_conference_participant(
-                call_uuid,
-                str(extension).strip(),
-                actor=request.actor,
-            )
+            if status.conference_id is None:
+                await CallOrchestrator(session, _asterisk_client).add_station_to_active_call(
+                    call_uuid,
+                    str(extension).strip(),
+                    actor=request.actor,
+                )
+            else:
+                await CallOrchestrator(session, _asterisk_client).rejoin_conference_participant(
+                    call_uuid,
+                    str(extension).strip(),
+                    actor=request.actor,
+                )
             participant = next(
                 item
                 for item in await service.participants(call_uuid)
