@@ -76,15 +76,16 @@ async def call_station(extension: str, conference: str | None = None):
         # previously left that conference must rejoin the same conference
         # instead of creating a second individual call.
         try:
-            conference_call_id = await core_client.active_conference_for_source(source)
+            active_call_id, conference_id = await core_client.active_call_for_source(source)
         except CoreClientError as exc:
-            if "no active conference" not in str(exc):
+            if "no active call" not in str(exc):
                 raise
-            conference_call_id = None
+            active_call_id = None
+            conference_id = None
 
-        if conference_call_id:
+        if active_call_id:
             return await core_client.participant_action(
-                call_id=conference_call_id,
+                call_id=active_call_id,
                 extension=extension,
                 action="connect",
                 actor=source,
