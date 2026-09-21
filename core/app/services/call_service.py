@@ -129,11 +129,31 @@ class CallService:
         if event.event_type == "StasisEnd":
             participant.disconnected_at = participant.disconnected_at or datetime.now(timezone.utc)
             participant.asterisk_channel_id = None
-            active = await self._active_participants(call.id)
-            if not active:
+
+            # An individual call is a two-party session. If the station leg ends,
+            # the controller leg must also be considered ended so the controller
+            # can immediately originate the next call. Previously the controller
+            # participant remained connected in the database, leaving the call in
+            # CONNECTED state and making the browser/Asterisk controller endpoint
+            # appear permanently IN CALL.
+            if (
+                call.mode == "individual"
+                and participant.role == "participant"
+            ):
                 call.state = CallState.ENDED.value
                 call.ended_at = datetime.now(timezone.utc)
-            self._add_event_by_id(call.id, "asterisk.channel.ended", event.channel_name or event.channel_id, {"channel_id": event.channel_id})
+            else:
+                active = await self._active_participants(call.id)
+                if not active:
+                    call.state = CallState.ENDED.value
+                    call.ended_at = datetime.now(timezone.utc)
+
+            self._add_event_by_id(
+                call.id,
+                "asterisk.channel.ended",
+                event.channel_name or event.channel_id,
+                {"channel_id": event.channel_id, "extension": participant.extension},
+            )
             return True
         return False
 
