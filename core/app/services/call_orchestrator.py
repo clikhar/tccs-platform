@@ -75,7 +75,33 @@ class CallOrchestrator:
         if participant is None:
             raise ValueError(f"participant {extension} is not in call {call_id}")
 
-        # Work only with primitive values after the transaction boundary.
+        # The ARI adapter keeps channel mappings in memory, so a Core restart
+        # loses the mapping even though the live Asterisk channels remain.
+        # Reconcile persisted channel IDs with live ARI channels before trying
+        # to originate another participant.
+        all_participants = await self.service.participants(call_id)
+        channel_data = [
+            (item.extension, item.role, item.asterisk_channel_id)
+            for item in all_participants
+            if item.asterisk_channel_id
+        ]
+        await self.service.session.rollback()
+
+        for mapped_extension, role, persisted_channel in channel_data:
+            if role not in {"controller", "participant"}:
+                continue
+            live_channel = await self.asterisk.find_active_channel(
+                str(call_id),
+                mapped_extension,
+                persisted_channel,
+            )
+            if live_channel:
+                await self.asterisk.attach_participant_channel(
+                    str(call_id),
+                    mapped_extension,
+                    live_channel,
+                )
+
         if participant[2]:
             return (await self.service.get(call_id)) or status
 
